@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "limitless-hl-bot"
+version = "0.1.0"
+description = "Limitless directional trading bot with Hyperliquid-derived scoring and learner loop"
+requires-python = ">=3.12"
+dependencies = [
+  "eth-account>=0.13",
+  "hyperliquid-python-sdk>=0.18",
+  "pytest>=8",
+  "requests>=2.31",
+  "web3>=7",
+]
+
+[tool.setuptools.packages.find]
+include = ["limitless_hl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

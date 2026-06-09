@@ -6,6 +6,7 @@ const LIMITLESS_ENV = [
   "LIMITLESS_MAKER_ADDRESS=\${LIMITLESS_MAKER_ADDRESS}",
   "LIMITLESS_FEE_RATE_BPS=\${LIMITLESS_FEE_RATE_BPS:-300}",
   "LIMITLESS_SIGNATURE_TYPE=\${LIMITLESS_SIGNATURE_TYPE:-0}",
+  "LIMITLESS_FUNDING_ALLOW_UNHEDGED=\${LIMITLESS_FUNDING_ALLOW_UNHEDGED:-1}",
 ].join(" ");
 
 module.exports = {
@@ -63,6 +64,21 @@ module.exports = {
       autorestart: true,
       restart_delay: 10000,
       max_restarts: 20,
+      time: true,
+      vizion: false,
+    },
+    // Strategy 3 — HL funding signal → Limitless 15-min (live, Kelly-sized)
+    {
+      name: "limitless-hl-funding-live",
+      cwd: ROOT,
+      script: "bash",
+      args: [
+        "--noprofile", "--norc", "-c",
+        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.funding_daemon --live-armed --kelly-fraction 0.25 --min-stake-usdc 1 --loop-seconds 20 --min-seconds-to-expiry 120 --jsonl-out tmp/limitless_hl/funding_trades.jsonl`,
+      ],
+      autorestart: true,
+      restart_delay: 10000,
+      max_restarts: 10,
       time: true,
       vizion: false,
     },

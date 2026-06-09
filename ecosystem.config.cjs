@@ -95,5 +95,19 @@ module.exports = {
       time: true,
       vizion: false,
     },
+    {
+      name: "limitless-hl-maker",
+      script: "/usr/bin/bash",
+      interpreter: "none",
+      args: [
+        "--noprofile", "--norc", "-c",
+        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.maker --live-armed --intervals 1h --symbols BTC,ETH,SOL,HYPE,BNB,DOGE,XRP --margin 0.05 --quote-size-usdc 2 --max-total-locked-usdc 14 --max-inventory-usdc 6 --max-markets 5 --min-seconds-to-expiry 600 --loop-seconds 10 --jsonl-out tmp/limitless_hl/maker_trades.jsonl`,
+      ],
+      cwd: ROOT,
+      autorestart: true,
+      max_restarts: 20,
+      restart_delay: 5000,
+      kill_timeout: 15000,
+    },
   ],
 };

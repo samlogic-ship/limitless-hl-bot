@@ -21,6 +21,20 @@ import requests
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 BINANCE_BOOK_URL = "https://api.binance.com/api/v3/ticker/bookTicker"
 BINANCE_SYMBOL_OVERRIDES = {"HYPE": None}  # no Binance spot listing
+HERMES_URL = "https://hermes.pyth.network/v2/updates/price/latest"
+
+# Pyth price feed ids (verified via Hermes /v2/price_feeds, 2026-06-09).
+# Hourly/daily/weekly markets resolve on Pyth 1-minute candle opens, so the
+# reference price for those intervals must come from Pyth itself.
+PYTH_FEED_IDS = {
+    "BTC": "e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+    "ETH": "ff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+    "SOL": "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
+    "HYPE": "4279e31cc369bbcc2faf022b382b080e32a8e689ff20fbc530d2a603eb6cd98b",
+    "BNB": "2f95862b045670cd22bee3114c39763a4a08beeb663b145d283c31d7d1101c4f",
+    "DOGE": "dcef50dd0a4cd2dcc17e45df1676dcb336a11a61c69df7a0299b0150c672d25c",
+    "XRP": "ec5d399846a9209f3fe5881d70aae9268c94339ff9817e8d18ff19fa05eea1c8",
+}
 
 # 52-day realized vol fallbacks (long_report.json, 2026-06-09)
 BASELINE_ANNUAL_VOL = {"BTC": 0.41, "ETH": 0.52, "SOL": 0.58, "HYPE": 0.98}
@@ -124,10 +138,19 @@ class PricingProvider:
 
     # -- spot reference price --------------------------------------------------
 
-    def ref_price(self, symbol: str, hyperliquid_mid: float) -> float:
-        """Binance spot mid when listed (closest to the Chainlink resolution feed),
-        otherwise the HL perp mid the caller already has."""
+    def ref_price(self, symbol: str, hyperliquid_mid: float, resolution: str = "chainlink") -> float:
+        """Reference price matched to the market's resolution feed.
+
+        5m/15m resolve on Chainlink CEX-composite streams → Binance spot mid is
+        the closest free proxy. 1h/1d/1w resolve on Pyth 1-minute candle opens →
+        use Pyth Hermes directly (feed-consistent with both the threshold capture
+        and the resolution print). Falls back down the chain on failure.
+        """
         symbol = symbol.upper()
+        if resolution == "pyth":
+            pyth = self._pyth_price(symbol)
+            if pyth:
+                return pyth
         if BINANCE_SYMBOL_OVERRIDES.get(symbol, symbol) is None:
             return hyperliquid_mid
         now = time.time()
@@ -148,6 +171,28 @@ class PricingProvider:
             spot = cached[1] if cached else None
         self._spot[symbol] = (now, spot)
         return spot or hyperliquid_mid
+
+    def _pyth_price(self, symbol: str) -> float | None:
+        feed_id = PYTH_FEED_IDS.get(symbol)
+        if not feed_id:
+            return None
+        now = time.time()
+        cached = getattr(self, "_pyth_cache", None)
+        if cached is None:
+            cached = self._pyth_cache = {}
+        hit = cached.get(symbol)
+        if hit and now - hit[0] <= 5:
+            return hit[1]
+        try:
+            resp = self.session.get(HERMES_URL, params=[("ids[]", feed_id)], timeout=self.timeout)
+            resp.raise_for_status()
+            parsed = (resp.json().get("parsed") or [])
+            price_obj = parsed[0]["price"]
+            value = float(price_obj["price"]) * (10 ** int(price_obj["expo"]))
+            cached[symbol] = (now, value)
+            return value
+        except Exception:
+            return hit[1] if hit else None
 
     # -- shared ------------------------------------------------------------------
 

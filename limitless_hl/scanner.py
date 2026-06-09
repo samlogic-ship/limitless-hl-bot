@@ -15,7 +15,7 @@ class PricingLike(Protocol):
     def up_shade_for(self, symbol: str) -> float:
         ...
 
-    def ref_price(self, symbol: str, hyperliquid_mid: float) -> float:
+    def ref_price(self, symbol: str, hyperliquid_mid: float, resolution: str = "chainlink") -> float:
         ...
 
 
@@ -70,7 +70,8 @@ class LimitlessHyperliquidScanner:
                 try:
                     vol = self.pricing.vol_for(market.symbol)
                     shade = self.pricing.up_shade_for(market.symbol)
-                    ref = self.pricing.ref_price(market.symbol, mid)
+                    resolution = "pyth" if market.interval in ("1h", "1d", "1w") else "chainlink"
+                    ref = self.pricing.ref_price(market.symbol, mid, resolution)
                 except Exception:
                     vol = shade = ref = None
             books.append({

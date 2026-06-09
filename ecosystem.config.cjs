@@ -1,11 +1,11 @@
 const ROOT = __dirname;
 const PYTHON = `${ROOT}/.venv/bin/python`;
-const LOAD_ENV = "set -a; [ -f .env ] && . ./.env; set +a;";
+const LOAD_ENV = "set -a; [ -f .env ] && . ./.env; set +a";
 const LIMITLESS_ENV = [
-  "LIMITLESS_OWNER_ID=${LIMITLESS_OWNER_ID}",
-  "LIMITLESS_MAKER_ADDRESS=${LIMITLESS_MAKER_ADDRESS}",
-  "LIMITLESS_FEE_RATE_BPS=${LIMITLESS_FEE_RATE_BPS:-300}",
-  "LIMITLESS_SIGNATURE_TYPE=${LIMITLESS_SIGNATURE_TYPE:-0}",
+  "LIMITLESS_OWNER_ID=\${LIMITLESS_OWNER_ID}",
+  "LIMITLESS_MAKER_ADDRESS=\${LIMITLESS_MAKER_ADDRESS}",
+  "LIMITLESS_FEE_RATE_BPS=\${LIMITLESS_FEE_RATE_BPS:-300}",
+  "LIMITLESS_SIGNATURE_TYPE=\${LIMITLESS_SIGNATURE_TYPE:-0}",
 ].join(" ");
 
 module.exports = {
@@ -44,7 +44,7 @@ module.exports = {
       script: "bash",
       args: [
         "--noprofile", "--norc", "-c",
-        `${LOAD_ENV}; LIMITLESS_MAKER_ADDRESS=${LIMITLESS_MAKER_ADDRESS} "${PYTHON}" -m limitless_hl.claimer --live --log-dir tmp/limitless_hl --loop-seconds 60 --jsonl-out tmp/limitless_hl/claims.jsonl`,
+        `${LOAD_ENV}; LIMITLESS_MAKER_ADDRESS=\${LIMITLESS_MAKER_ADDRESS} "${PYTHON}" -m limitless_hl.claimer --live --log-dir tmp/limitless_hl --loop-seconds 60 --jsonl-out tmp/limitless_hl/claims.jsonl`,
       ],
       autorestart: true,
       restart_delay: 10000,
@@ -58,7 +58,7 @@ module.exports = {
       script: "bash",
       args: [
         "--noprofile", "--norc", "-c",
-        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.funding_daemon --stake-usdc 1 --max-daily-loss-usdc 10 --loop-seconds 20 --min-seconds-to-expiry 120 --jsonl-out tmp/limitless_hl/funding_dry.jsonl`,
+        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.funding_daemon --min-stake-usdc 1 --loop-seconds 20 --min-seconds-to-expiry 120 --jsonl-out tmp/limitless_hl/funding_dry.jsonl`,
       ],
       autorestart: true,
       restart_delay: 10000,
@@ -86,7 +86,7 @@ module.exports = {
       script: "bash",
       args: [
         "--noprofile", "--norc", "-c",
-        `"${PYTHON}" -m limitless_hl.tgbot`,
+        `${LOAD_ENV}; "${PYTHON}" -m limitless_hl.tgbot`,
       ],
       autorestart: true,
       restart_delay: 10000,

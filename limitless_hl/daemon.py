@@ -90,6 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--slice-live-min-n", type=int, default=4, help="Demote a seeded slice when live resolved sample is large enough and weak")
     p.add_argument("--slice-live-min-roi", type=float, default=0.0, help="Minimum live-only ROI required once live sample reaches --slice-live-min-n")
     p.add_argument("--slice-strategies", default="scored_daemon,seed", help="Comma-separated learner strategies allowed to promote scored live daemon slices")
+    p.add_argument("--shadow-graduate", action="store_true", help="Allow strong shadow_daemon slices to graduate into live eligibility")
+    p.add_argument("--shadow-min-n", type=int, default=20, help="Minimum resolved shadow trades before a slice can graduate")
+    p.add_argument("--shadow-min-roi", type=float, default=0.10, help="Minimum shadow ROI required before live graduation")
+    p.add_argument("--shadow-min-win-rate", type=float, default=0.52, help="Minimum shadow win rate required before live graduation")
     p.add_argument("--scoring-live", action="store_true", help="Score live candidates with momentum/funding/basis features")
     p.add_argument("--score-min", type=float, default=1.0)
     p.add_argument("--score-base-stake-usdc", type=float, default=1.0)
@@ -300,7 +304,21 @@ def main() -> None:
                 live_min_roi=args.slice_live_min_roi,
                 allowed_strategies=_parse_strategy_filter(args.slice_strategies),
             )
-            slice_stats = _load_slice_stats(slice_score_path, allowed_strategies=_parse_strategy_filter(args.slice_strategies))
+            if args.shadow_graduate:
+                shadow_scores = _load_slice_scores(
+                    slice_score_path,
+                    min_n=args.shadow_min_n,
+                    min_roi=args.shadow_min_roi,
+                    min_win_rate=args.shadow_min_win_rate,
+                    live_min_n=args.slice_live_min_n,
+                    live_min_roi=args.slice_live_min_roi,
+                    allowed_strategies={"shadow_daemon"},
+                )
+                slice_scores |= shadow_scores
+            stats_strategies = _parse_strategy_filter(args.slice_strategies)
+            if args.shadow_graduate:
+                stats_strategies |= {"shadow_daemon"}
+            slice_stats = _load_slice_stats(slice_score_path, allowed_strategies=stats_strategies)
 
         # Scan
         try:

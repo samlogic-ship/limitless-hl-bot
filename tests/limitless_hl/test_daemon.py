@@ -196,6 +196,51 @@ def test_slice_scores_ignore_other_live_strategies(tmp_path: Any) -> None:
     assert scores == set()
 
 
+def test_shadow_slice_can_graduate_with_strict_thresholds(tmp_path: Any) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(
+        '{"resolved":['
+        '{"fill":{"slug":"eth-1","symbol":"ETH","side":"UP","price":0.5,"stake_usdc":1,'
+        '"raw":{"interval":"5m","strategy":"shadow_daemon"}},"won":true,"pnl_usdc":1.0},'
+        '{"fill":{"slug":"eth-2","symbol":"ETH","side":"UP","price":0.5,"stake_usdc":1,'
+        '"raw":{"interval":"5m","strategy":"shadow_daemon"}},"won":true,"pnl_usdc":1.0},'
+        '{"fill":{"slug":"eth-3","symbol":"ETH","side":"UP","price":0.5,"stake_usdc":1,'
+        '"raw":{"interval":"5m","strategy":"shadow_daemon"}},"won":false,"pnl_usdc":-1.0}'
+        ']}',
+        encoding="utf-8",
+    )
+
+    scores = _load_slice_scores(
+        report,
+        min_n=3,
+        min_roi=0.20,
+        min_win_rate=0.60,
+        allowed_strategies={"shadow_daemon"},
+    )
+
+    assert scores == {("5m", "ETH", "UP")}
+
+
+def test_shadow_slice_does_not_graduate_with_small_sample(tmp_path: Any) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(
+        '{"resolved":[{"fill":{"slug":"hype-1","symbol":"HYPE","side":"DOWN",'
+        '"price":0.5,"stake_usdc":1,"raw":{"interval":"15m","strategy":"shadow_daemon"}},'
+        '"won":true,"pnl_usdc":1.0}]}',
+        encoding="utf-8",
+    )
+
+    scores = _load_slice_scores(
+        report,
+        min_n=20,
+        min_roi=0.10,
+        min_win_rate=0.52,
+        allowed_strategies={"shadow_daemon"},
+    )
+
+    assert scores == set()
+
+
 def test_score_candidates_updates_stake_and_explains_blocks() -> None:
     candidates = [
         _fake_candidate(slug="btc-15", seconds=600)

@@ -67,21 +67,6 @@ module.exports = {
       time: true,
       vizion: false,
     },
-    // Strategy 3 — HL funding signal → Limitless 15-min (live, Kelly-sized)
-    {
-      name: "limitless-hl-funding-live",
-      cwd: ROOT,
-      script: "bash",
-      args: [
-        "--noprofile", "--norc", "-c",
-        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.funding_daemon --live-armed --kelly-fraction 0.25 --min-stake-usdc 1 --loop-seconds 20 --min-seconds-to-expiry 120 --jsonl-out tmp/limitless_hl/funding_trades.jsonl`,
-      ],
-      autorestart: true,
-      restart_delay: 10000,
-      max_restarts: 10,
-      time: true,
-      vizion: false,
-    },
     {
       name: "limitless-hl-dry-run",
       cwd: ROOT,

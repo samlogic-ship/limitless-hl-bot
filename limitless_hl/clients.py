@@ -8,7 +8,7 @@ import requests
 from .model import LimitlessMarket, OrderBook
 from .attribution import ResolvedMarket
 
-SUPPORTED_SYMBOLS = {"BTC", "ETH", "SOL", "HYPE", "BNB", "DOGE", "XRP"}
+UP_DOWN_MARKET_RE = re.compile(r"^([A-Z0-9]{2,12}) Up or Down - (5 Min|15 Min|Hourly|Daily|Weekly)$")
 
 
 class LimitlessClient:
@@ -18,7 +18,7 @@ class LimitlessClient:
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json", "User-Agent": "limitless-hl/0.1"})
 
-    def active_crypto_markets(self, pages: int = 4, limit: int = 25) -> list[LimitlessMarket]:
+    def active_crypto_markets(self, pages: int = 8, limit: int = 25) -> list[LimitlessMarket]:
         markets: list[LimitlessMarket] = []
         for page in range(1, pages + 1):
             payload = self.session.get(
@@ -57,7 +57,7 @@ class LimitlessClient:
     @staticmethod
     def parse_market(row: dict[str, Any]) -> LimitlessMarket | None:
         title = str(row.get("title") or "")
-        match = re.match(r"^(BTC|ETH|SOL|HYPE|BNB|DOGE|XRP) Up or Down - (5 Min|15 Min|Hourly|Daily)$", title)
+        match = UP_DOWN_MARKET_RE.match(title)
         if not match:
             return None
         if row.get("tradeType") != "clob":
@@ -142,7 +142,7 @@ class HyperliquidClient:
 
 
 def _normalize_interval(label: str) -> str:
-    return {"5 Min": "5m", "15 Min": "15m", "Hourly": "1h", "Daily": "1d"}[label]
+    return {"5 Min": "5m", "15 Min": "15m", "Hourly": "1h", "Daily": "1d", "Weekly": "1w"}[label]
 
 
 def _normalize_size(value: Any) -> float:

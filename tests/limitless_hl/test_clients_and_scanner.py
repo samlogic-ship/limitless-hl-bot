@@ -42,6 +42,39 @@ def test_limitless_client_parses_crypto_market_payload_and_orderbook() -> None:
     assert book.down_ask == 0.29
 
 
+def test_limitless_client_parses_additional_crypto_and_weekly_markets() -> None:
+    payload = {
+        "data": [
+            {
+                "title": "AVAX Up or Down - Daily",
+                "slug": "avax-up-or-down-daily-1",
+                "tradeType": "clob",
+                "volumeFormatted": "25",
+                "expirationTimestamp": 1_000_000,
+                "metadata": {"openPrice": "13.37"},
+            },
+            {
+                "title": "HYPE Up or Down - Weekly",
+                "slug": "hype-up-or-down-weekly-1",
+                "tradeType": "clob",
+                "volumeFormatted": "30",
+                "expirationTimestamp": 1_000_000,
+                "metadata": {"openPrice": "55.5"},
+            },
+            {
+                "title": "Tesla (TSLA) Up or Down - Weekly",
+                "slug": "tsla-weekly-1",
+                "tradeType": "clob",
+                "metadata": {"openPrice": "100"},
+            },
+        ]
+    }
+
+    markets = LimitlessClient.parse_active_markets(payload)
+
+    assert [(market.symbol, market.interval) for market in markets] == [("AVAX", "1d"), ("HYPE", "1w")]
+
+
 def test_hyperliquid_client_parses_all_mids_for_supported_symbols() -> None:
     mids = HyperliquidClient.parse_all_mids({"BTC": "62789.5", "ETH": "1671.5", "PURR": "0.12"})
 
@@ -124,3 +157,40 @@ def test_scanner_diagnostics_reports_rejected_markets() -> None:
     assert report["candidate_count"] == 0
     assert report["rejected_count"] == 1
     assert report["rejections"][0]["reason"] == "no_positive_edge"
+
+
+def test_scanner_rejects_parsed_market_without_reference_mid() -> None:
+    class FakeLimitless:
+        def active_crypto_markets(self):
+            return [
+                LimitlessClient.parse_market(
+                    {
+                        "title": "AVAX Up or Down - Daily",
+                        "slug": "avax-up-or-down-daily-1",
+                        "tradeType": "clob",
+                        "volumeFormatted": "1000",
+                        "expirationTimestamp": 1_100_000_000,
+                        "metadata": {"openPrice": "20"},
+                    }
+                )
+            ]
+
+        def orderbook(self, slug: str):  # pragma: no cover - should not be called without mid
+            raise AssertionError(slug)
+
+    class FakeHyperliquid:
+        def all_mids(self):
+            return {"BTC": 100.0}
+
+    scanner = LimitlessHyperliquidScanner(
+        limitless=FakeLimitless(),
+        hyperliquid=FakeHyperliquid(),
+        config=EdgeConfig(),
+    )
+
+    report = scanner.scan_report(now_ms=1_000_000_000)
+
+    assert report["market_count"] == 1
+    assert report["candidate_count"] == 0
+    assert report["rejections"][0]["symbol"] == "AVAX"
+    assert report["rejections"][0]["reason"] == "missing_hyperliquid_mid"

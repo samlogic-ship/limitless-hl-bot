@@ -47,6 +47,9 @@ VOL_CAP = 3.0
 REVERSAL_SHADE = 0.02
 MINUTES_PER_YEAR = 365.0 * 24.0 * 60.0
 
+# Written by calibrator.py every session; hot-reloaded here.
+PRICING_PARAMS_PATH = "tmp/limitless_hl/pricing_params.json"
+
 
 class PricingProvider:
     """Per-symbol dynamic vol, reversal shade, and spot reference price.
@@ -75,25 +78,54 @@ class PricingProvider:
         self._ewma: dict[str, tuple[float, float, int, float]] = {}
         self._shade: dict[str, tuple[float, float]] = {}
         self._spot: dict[str, tuple[float, float | None]] = {}
+        self._params: dict[str, dict] = {}
+        self._params_mtime: float = 0.0
+        self._params_checked: float = 0.0
+        self._feed_ids: dict[str, str | None] = dict(PYTH_FEED_IDS)
+
+    # -- session-calibrated params (hot-reloaded) -------------------------------
+
+    def _param(self, symbol: str, key: str, default: float) -> float:
+        import os
+        now = time.time()
+        if now - self._params_checked > 60:
+            self._params_checked = now
+            try:
+                mtime = os.path.getmtime(PRICING_PARAMS_PATH)
+                if mtime != self._params_mtime:
+                    import json as _json
+                    with open(PRICING_PARAMS_PATH, encoding="utf-8") as handle:
+                        self._params = _json.load(handle).get("symbols") or {}
+                    self._params_mtime = mtime
+            except OSError:
+                pass
+        row = self._params.get(symbol)
+        if row and key in row:
+            try:
+                return float(row[key])
+            except (TypeError, ValueError):
+                return default
+        return default
 
     # -- volatility -----------------------------------------------------------
 
     def vol_for(self, symbol: str) -> float:
         symbol = symbol.upper()
         now = time.time()
+        scale = self._param(symbol, "vol_scale", VOL_SCALE)
         cached = self._ewma.get(symbol)
         if cached and now - cached[0] <= self.vol_ttl_seconds:
-            return self._annualize(cached[1])
+            return self._annualize(cached[1], scale)
         try:
             candles = self._fetch_candles(symbol, "1m", self.bootstrap_minutes)
             variance = self._ewma_variance(symbol, candles)
             if variance is None:
                 raise ValueError("no candles")
             self._ewma[symbol] = (now, variance, int(candles[-1]["t"]), float(candles[-1]["c"]))
-            return self._annualize(variance)
+            return self._annualize(variance, scale)
         except Exception:
             if cached:
-                return self._annualize(cached[1])
+                return self._annualize(cached[1], scale)
             return BASELINE_ANNUAL_VOL.get(symbol, DEFAULT_ANNUAL_VOL)
 
     def _ewma_variance(self, symbol: str, candles: list[dict]) -> float | None:
@@ -107,8 +139,8 @@ class PricingProvider:
         return variance
 
     @staticmethod
-    def _annualize(variance_1m: float) -> float:
-        vol = math.sqrt(max(variance_1m, 0.0) * MINUTES_PER_YEAR) * VOL_SCALE
+    def _annualize(variance_1m: float, scale: float = VOL_SCALE) -> float:
+        vol = math.sqrt(max(variance_1m, 0.0) * MINUTES_PER_YEAR) * scale
         return min(VOL_CAP, max(VOL_FLOOR, vol))
 
     # -- reversal shade --------------------------------------------------------
@@ -123,14 +155,15 @@ class PricingProvider:
         try:
             candles = self._fetch_candles(symbol, "15m", 75)
             completed = [c for c in candles if int(c["T"]) <= int(time.time() * 1000)]
+            shade_amount = self._param(symbol, "shade", REVERSAL_SHADE)
             shade = 0.0
             if len(completed) >= 2:
                 d1 = _direction(completed[-1])
                 d2 = _direction(completed[-2])
                 if d1 == d2 == "U":
-                    shade = -REVERSAL_SHADE
+                    shade = -shade_amount
                 elif d1 == d2 == "D":
-                    shade = REVERSAL_SHADE
+                    shade = shade_amount
             self._shade[symbol] = (now, shade)
             return shade
         except Exception:
@@ -172,8 +205,29 @@ class PricingProvider:
         self._spot[symbol] = (now, spot)
         return spot or hyperliquid_mid
 
+    def _pyth_feed_id(self, symbol: str) -> str | None:
+        if symbol in self._feed_ids:
+            return self._feed_ids[symbol]
+        feed_id: str | None = None
+        try:
+            resp = self.session.get(
+                "https://hermes.pyth.network/v2/price_feeds",
+                params={"query": symbol, "asset_type": "crypto"},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            for feed in resp.json():
+                attrs = feed.get("attributes") or {}
+                if attrs.get("base") == symbol and attrs.get("quote_currency") == "USD":
+                    feed_id = feed["id"]
+                    break
+        except Exception:
+            return None  # transient: retry next call, don't negative-cache
+        self._feed_ids[symbol] = feed_id
+        return feed_id
+
     def _pyth_price(self, symbol: str) -> float | None:
-        feed_id = PYTH_FEED_IDS.get(symbol)
+        feed_id = self._pyth_feed_id(symbol)
         if not feed_id:
             return None
         now = time.time()

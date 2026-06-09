@@ -317,11 +317,11 @@ class MakerEngine:
         try:
             for row in rows:
                 market = row.get("market") or {}
-                if market.get("closed") or market.get("expired"):
-                    continue
                 slug = str(market.get("slug") or row.get("marketSlug") or "")
                 symbol = slug_symbols.get(slug)
                 if symbol is None:
+                    continue
+                if market.get("closed") or market.get("expired"):
                     continue
                 balances = row.get("tokensBalance") or {}
                 yes_shares = float(balances.get("yes") or 0) / 1_000_000
@@ -387,13 +387,27 @@ class MakerEngine:
 
     def run_once(self) -> dict[str, Any]:
         now_ms = int(time.time() * 1000)
+        auto = "AUTO" in self.config.symbols
         markets = [
             m
             for m in self.limitless.active_crypto_markets()
-            if m.interval in self.config.intervals and m.symbol in self.config.symbols
+            if m.interval in self.config.intervals
+            and (auto or m.symbol in self.config.symbols)
+            and 0 < (m.expiration_ms - now_ms) / 1000 <= self.config.max_seconds_to_expiry
         ]
-        markets.sort(key=lambda m: m.expiration_ms)
-        markets = markets[: self.config.max_markets]
+        # Rank by quoted spread: the widest books pay the fattest maker margin.
+        books_by_slug: dict[str, Any] = {}
+        ranked: list[tuple[float, Any]] = []
+        for market in markets[:15]:
+            try:
+                book = self.limitless.orderbook(market.slug)
+            except Exception:
+                continue
+            books_by_slug[market.slug] = book
+            if book.up_bid > 0 and book.up_ask > 0:
+                ranked.append((book.up_ask - book.up_bid, market))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        markets = [market for _, market in ranked[: self.config.max_markets]]
         slug_symbols = {m.slug: m.symbol for m in markets}
 
         mids = self._hl_mids()
@@ -410,7 +424,7 @@ class MakerEngine:
             if not mid:
                 continue
             try:
-                book = self.limitless.orderbook(market.slug)
+                book = books_by_slug.get(market.slug) or self.limitless.orderbook(market.slug)
                 vol = self.pricing.vol_for(market.symbol)
                 shade = self.pricing.up_shade_for(market.symbol)
                 resolution = "pyth" if market.interval in ("1h", "1d", "1w") else "chainlink"

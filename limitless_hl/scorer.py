@@ -100,11 +100,16 @@ def score_candidate(
     reasons: list[str] = []
     score = float(candidate.get("edge") or 0.0) * 10.0
 
-    if stats is None or stats.n < config.min_slice_n or stats.roi < config.min_slice_roi or stats.win_rate < config.min_slice_win_rate:
-        return _result(False, score, 0.0, "slice_not_promoted", reasons, features)
-
-    reasons.append("slice_positive")
-    score += min(2.0, stats.roi * 2.0) + min(1.0, stats.win_rate)
+    if config.min_slice_n > 0:
+        if stats is None or stats.n < config.min_slice_n or stats.roi < config.min_slice_roi or stats.win_rate < config.min_slice_win_rate:
+            return _result(False, score, 0.0, "slice_not_promoted", reasons, features)
+        reasons.append("slice_positive")
+        score += min(2.0, stats.roi * 2.0) + min(1.0, stats.win_rate)
+    elif stats is None:
+        reasons.append("slice_discovery")
+    else:
+        reasons.append("slice_observed")
+        score += max(-1.0, min(1.0, stats.roi)) + min(0.5, stats.win_rate)
 
     threshold = float(candidate.get("threshold_price") or 0.0)
     hl_mid = features.hl_mid or float(candidate.get("hyperliquid_mid") or 0.0)

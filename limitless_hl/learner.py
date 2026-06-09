@@ -447,6 +447,7 @@ def _daemon_trade(payload: dict[str, Any], *, source: str, source_path: str, lin
     slug = str(candidate.get("slug") or payload.get("slug") or "")
     side = str(candidate.get("side") or "").upper()
     price = _to_float(candidate.get("limit_price") or candidate.get("price"))
+    strategy = "shadow_daemon" if payload.get("mode") == "dry_run" else "scored_daemon"
     return _make_trade(
         payload,
         source=source,
@@ -458,7 +459,7 @@ def _daemon_trade(payload: dict[str, Any], *, source: str, source_path: str, lin
         side=side,
         price=price,
         stake=filled,
-        strategy="scored_daemon",
+        strategy=strategy,
     )
 
 
@@ -467,6 +468,7 @@ def _funding_trade(payload: dict[str, Any], *, source: str, source_path: str, li
     matched = str(payload.get("state") or "") == "filled" or filled > 0
     if not matched or filled <= 0:
         return None
+    strategy = "shadow_funding" if payload.get("mode") == "dry_run" else "funding_kelly"
     return _make_trade(
         payload,
         source=source,
@@ -478,7 +480,7 @@ def _funding_trade(payload: dict[str, Any], *, source: str, source_path: str, li
         side=str(payload.get("direction") or "").upper(),
         price=_to_float(payload.get("entry_price")),
         stake=filled,
-        strategy="funding_kelly",
+        strategy=strategy,
     )
 
 
@@ -580,8 +582,10 @@ def _source_name(path: Path) -> str:
     name = path.name
     if name == "daemon_trades.jsonl":
         return "daemon"
-    if name == "funding_trades.jsonl":
+    if name in {"funding_trades.jsonl", "funding_dry.jsonl"}:
         return "funding"
+    if name == "daemon_shadow.jsonl":
+        return "daemon"
     return path.stem.replace("_trades", "")
 
 

@@ -552,10 +552,23 @@ def main() -> None:
             )
 
             if not args.live_armed:
-                print(json.dumps({"event": "dry_run_signal", "coin": sig.coin,
-                                  "direction": sig.direction, "entry_price": entry_price,
-                                  "ev_pct": round(ev_pct, 4), "rate": rate,
-                                  "kelly_stake_usdc": stake_usdc, "bankroll": bankroll}), flush=True)
+                entry = {
+                    "event": "trade",
+                    "mode": "dry_run",
+                    "state": "filled",
+                    "slug": market["slug"],
+                    "coin": sig.coin,
+                    "direction": sig.direction,
+                    "entry_price": entry_price,
+                    "filled_usdc": stake_usdc,
+                    "kelly_stake_usdc": stake_usdc,
+                    "ev_pct": round(ev_pct, 4),
+                    "rate": rate,
+                    "bankroll": bankroll,
+                    "ts_ms": now_ms,
+                }
+                _log(out_path, entry)
+                print(json.dumps(entry, sort_keys=True), flush=True)
                 traded = True
                 break
 

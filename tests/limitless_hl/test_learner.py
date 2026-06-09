@@ -69,6 +69,22 @@ def test_trade_from_event_parses_daemon_and_funding_live_fills() -> None:
     assert funding.strategy == "funding_kelly"
 
 
+def test_trade_from_event_marks_dry_daemon_as_shadow() -> None:
+    payload = _daemon_event() | {"mode": "dry_run"}
+    trade = trade_from_event(payload, source="daemon", source_path="daemon_shadow.jsonl", line_no=1)
+
+    assert trade is not None
+    assert trade.strategy == "shadow_daemon"
+
+
+def test_trade_from_event_marks_dry_funding_as_shadow() -> None:
+    payload = _funding_event() | {"mode": "dry_run"}
+    trade = trade_from_event(payload, source="funding", source_path="funding_dry.jsonl", line_no=1)
+
+    assert trade is not None
+    assert trade.strategy == "shadow_funding"
+
+
 def test_ingest_jsonl_is_idempotent(tmp_path: Path) -> None:
     log = tmp_path / "daemon_trades.jsonl"
     log.write_text(json.dumps(_daemon_event()) + "\n", encoding="utf-8")

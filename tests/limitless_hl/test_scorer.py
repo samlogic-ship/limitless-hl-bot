@@ -60,6 +60,20 @@ def test_score_candidate_blocks_degraded_slice() -> None:
     assert result.reason == "slice_not_promoted"
 
 
+def test_score_candidate_discovery_mode_allows_unknown_slice() -> None:
+    result = score_candidate(
+        _candidate(edge=0.02),
+        slice_stats={},
+        features=MarketFeatures(hl_mid=101.0, momentum_1m_bps=10.0, momentum_3m_bps=20.0, momentum_5m_bps=30.0),
+        config=ScoringConfig(min_slice_n=0, min_score=0.0, base_stake_usdc=1.0, max_stake_usdc=1.0),
+    )
+
+    assert result.allowed is True
+    assert result.reason == "allowed"
+    assert result.stake_usdc == 1.0
+    assert "slice_discovery" in result.reasons
+
+
 def test_score_candidate_penalizes_crowded_late_up_trade() -> None:
     result = score_candidate(
         _candidate(),

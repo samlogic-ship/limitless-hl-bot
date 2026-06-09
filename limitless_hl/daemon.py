@@ -45,8 +45,8 @@ class _PreviewLeg:
     def submit(self, candidate: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
         return {
             "submitted": False,
-            "matched": False,
-            "filled_usdc": 0.0,
+            "matched": True,
+            "filled_usdc": float(candidate.get("stake_usdc") or 0.0),
             "intent": asdict(self._intent),
             "raw": {"mode": "preview"},
         }
@@ -54,7 +54,7 @@ class _PreviewLeg:
 
 class _PreviewHedger:
     def hedge(self, plan: Any) -> dict[str, Any]:
-        return {"submitted": False, "plan": asdict(plan), "raw": {"mode": "preview"}}
+        return {"submitted": True, "plan": asdict(plan), "raw": {"mode": "preview"}}
 
 
 # ---------------------------------------------------------------------------

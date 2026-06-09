@@ -58,33 +58,32 @@ Runtime data lives in `tmp/limitless_hl/` (gitignored):
 
 ## Hard rules — do not violate these
 
-### FundingProofConfig must NOT have `max_live_stake_usdc`
-Kelly sizing is uncapped by design. This field has been removed on purpose and must never be re-added:
+### Risk caps stay in, period
+`FundingProofConfig.max_live_stake_usdc`, `RiskConfig.max_daily_loss_usdc`,
+`RiskConfig.max_stake_usdc`, and the daemon's `--max-daily-loss-usdc` /
+`--stake-usdc` args are LOAD-BEARING. Never remove or raise them because a
+strategy "looks profitable" — see tmp/study/: the previous +$170 headline was
+seeded backtest data; real live PnL at the time was negative. Kelly sizing is
+always applied UNDER these caps, never instead of them.
 
-```python
-# CORRECT
-@dataclass(frozen=True)
-class FundingProofConfig:
-    min_backtest_wr: float = 0.56
-    min_backtest_n: int = 1_000
-    min_ev_pct: float = 0.10
+### funding-live stays OFF until proven
+`limitless-hl-funding-live` may only be started after the learner shows
+positive LIVE-ONLY ROI (report key `realized_pnl_usdc`, not `combined`) on
+100+ resolved funding fills. As of 2026-06-09 live funding is 6/22 wins,
+-$34.91. "Losses are normal variance" is not an argument — evidence is.
 
-# WRONG — do not add this back
-#   max_live_stake_usdc: float = 5.0
-```
+### No pause file for the funding daemon
+Never create `tmp/limitless_hl/funding_daemon.pause`; it silently no-ops the
+process. Use `pm2 stop` so the state is visible.
 
-The `passes_live_funding_proof` function must not check `config.max_live_stake_usdc`. Kelly fraction (`--kelly-fraction 0.25`) already limits risk.
+### Headline PnL is live-only
+`evaluation_report_live.json` headline keys exclude seeded rows; seeds appear
+only under `seeded`/`combined`. Never "fix" the report to merge them back.
 
-### No pause file
-Never create `tmp/limitless_hl/funding_daemon.pause`. It silently kills the live process by looping without trading. If you need to disable trading, use `pm2 stop`.
-
-### ecosystem.config.cjs — keep `limitless-hl-funding-live`
-This entry must always be present. Do not remove it because of observed losses — losses are normal variance in a positive-EV strategy.
-
-### Do not add `--stake-usdc` or `--max-daily-loss-usdc` to funding_daemon args
-The funding daemon uses Kelly sizing (`--kelly-fraction`, `--min-stake-usdc`). Fixed stake args were removed intentionally.
-
----
+### Fees are modeled exactly
+Taker buy fee is 3.00% flat at any price <= $0.50 (declining above) and is
+priced inside `model.taker_buy_fee_rate`. Never replace it with a flat buffer
+again, and never assume the old 1.5% number.
 
 ## Secrets map
 

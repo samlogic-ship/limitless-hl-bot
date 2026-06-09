@@ -162,5 +162,8 @@ def test_seed_report_keeps_historical_slice_available(tmp_path: Path) -> None:
         now_ms=5000,
     )
 
-    assert report["resolved_count"] == 1
+    # Headline is live-only; the seeded row lives under seeded/combined.
+    assert report["resolved_count"] == 0
+    assert report["seeded"]["resolved_count"] == 1
+    assert report["combined"]["resolved_count"] == 1
     assert _load_slice_scores(report_path, min_n=1, min_roi=0.01, min_win_rate=0.5) == {("15m", "HYPE", "UP")}

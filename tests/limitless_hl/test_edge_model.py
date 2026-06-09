@@ -84,3 +84,24 @@ def test_choose_candidate_rejects_stale_expired_and_thin_books() -> None:
     )
 
     assert candidate is None
+
+
+def test_taker_buy_fee_curve():
+    from limitless_hl.model import taker_buy_fee_rate
+
+    assert taker_buy_fee_rate(0.15) == 0.03
+    assert taker_buy_fee_rate(0.50) == 0.03
+    assert abs(taker_buy_fee_rate(0.65) - 0.018) < 1e-9
+    assert abs(taker_buy_fee_rate(0.95) - 0.0053) < 1e-9
+    # interpolation between published points
+    assert 0.0252 < taker_buy_fee_rate(0.52) < 0.03
+
+
+def test_probability_shade_applies_to_up_side():
+    from limitless_hl.model import estimate_binary_probability
+
+    base = estimate_binary_probability(100.0, 100.0, 600, 0.75, 'UP')
+    shaded = estimate_binary_probability(100.0, 100.0, 600, 0.75, 'UP', up_probability_shade=0.02)
+    assert abs((shaded - base) - 0.02) < 1e-9
+    down = estimate_binary_probability(100.0, 100.0, 600, 0.75, 'DOWN', up_probability_shade=0.02)
+    assert abs((1 - shaded) - down) < 1e-9

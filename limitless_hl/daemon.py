@@ -30,6 +30,7 @@ from .live_trade import (
 from .model import EdgeConfig
 from .risk import RiskConfig, RiskLedger, RiskManager
 from .scanner import LimitlessHyperliquidScanner
+from .volatility import PricingProvider
 from .scorer import LiveFeatureProvider, ScoringConfig, SliceStats, load_hl_bot_context, score_candidate
 from .secrets import get_secret
 
@@ -103,6 +104,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--score-max-stake-usdc", type=float, default=3.0)
     p.add_argument("--hl-bot-status-file", default="", help="Optional hl_bot_status.json used as a soft scoring feature")
     p.add_argument("--hl-bot-status-max-age-ms", type=int, default=120_000)
+    # Pricing
+    p.add_argument("--flat-pricing", action="store_true",
+                   help="Disable dynamic EWMA vol / reversal shade / spot ref; use flat config vol")
+    p.add_argument("--book-log", default="",
+                   help="Optional jsonl path: append per-scan orderbook snapshots for calibration studies")
     # Loop
     p.add_argument("--loop-seconds", type=int, default=20)
     p.add_argument("--iterations", type=int, default=0, help="0 = run forever")
@@ -227,6 +233,7 @@ def main() -> None:
             raise SystemExit("--allow-unhedged-live is capped at --stake-usdc 5 for the pilot")
         _ensure_eoa_mode()
 
+    pricing = None if args.flat_pricing else PricingProvider()
     scanner = LimitlessHyperliquidScanner(
         limitless=LimitlessClient(),
         hyperliquid=HyperliquidClient(),
@@ -237,6 +244,7 @@ def main() -> None:
             stake_usdc=args.stake_usdc,
             min_size_usdc=args.stake_usdc,  # only require liquidity >= our stake
         ),
+        pricing=pricing,
     )
     risk = RiskManager(RiskConfig(
         max_daily_loss_usdc=args.max_daily_loss_usdc,
@@ -325,6 +333,15 @@ def main() -> None:
         # Scan
         try:
             report = scanner.scan_report(now_ms=now_ms)
+            if args.book_log:
+                try:
+                    book_path = Path(args.book_log)
+                    book_path.parent.mkdir(parents=True, exist_ok=True)
+                    with book_path.open("a", encoding="utf-8") as handle:
+                        for row in report.get("books") or []:
+                            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+                except Exception:
+                    pass
             candidates: list[dict[str, Any]] = _filter_candidates(
                 report.get("candidates") or [],
                 symbols=_parse_filter(args.symbols),

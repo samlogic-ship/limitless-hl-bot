@@ -244,7 +244,9 @@ def build_report(conn: sqlite3.Connection, *, seed_reports: Iterable[str | Path]
         ORDER BY t.ts_ms ASC, t.trade_key ASC
         """
     ).fetchall()
-    resolved_rows = _seed_resolved_rows(seed_reports) + [_resolution_from_row(row).to_report_row() for row in rows]
+    live_rows = [_resolution_from_row(row).to_report_row() for row in rows]
+    seed_rows = _seed_resolved_rows(seed_reports)
+    resolved_rows = seed_rows + live_rows
     unresolved_count = int(conn.execute(
         """
         SELECT COUNT(*) FROM trades t
@@ -252,20 +254,30 @@ def build_report(conn: sqlite3.Connection, *, seed_reports: Iterable[str | Path]
         WHERE r.trade_key IS NULL
         """
     ).fetchone()[0])
-    wins = sum(1 for row in resolved_rows if row["won"])
-    losses = len(resolved_rows) - wins
-    realized = round(sum(float(row["pnl_usdc"] or 0) for row in resolved_rows), 8)
-    staked = round(sum(float(row["fill"]["stake_usdc"] or 0) for row in resolved_rows), 8)
+
+    def _aggregate(subset: list[dict[str, Any]]) -> dict[str, Any]:
+        wins = sum(1 for row in subset if row["won"])
+        realized = round(sum(float(row["pnl_usdc"] or 0) for row in subset), 8)
+        staked = round(sum(float(row["fill"]["stake_usdc"] or 0) for row in subset), 8)
+        return {
+            "resolved_count": len(subset),
+            "wins": wins,
+            "losses": len(subset) - wins,
+            "win_rate": wins / len(subset) if subset else None,
+            "realized_pnl_usdc": realized,
+            "resolved_stake_usdc": staked,
+            "roi": realized / staked if staked else None,
+        }
+
+    # Headline numbers are LIVE ONLY. Seeded backtest rows still feed the
+    # combined `resolved` list (slice bootstrapping) but never the headline —
+    # mixing them previously reported backtest profit as realized PnL.
     return {
-        "fill_count": len(resolved_rows) + unresolved_count,
-        "resolved_count": len(resolved_rows),
+        "fill_count": len(live_rows) + unresolved_count,
         "unresolved_count": unresolved_count,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": wins / len(resolved_rows) if resolved_rows else None,
-        "realized_pnl_usdc": realized,
-        "resolved_stake_usdc": staked,
-        "roi": realized / staked if staked else None,
+        **_aggregate(live_rows),
+        "seeded": _aggregate(seed_rows),
+        "combined": _aggregate(resolved_rows),
         "slices": slice_summary(conn),
         "resolved": resolved_rows,
     }

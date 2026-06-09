@@ -74,6 +74,20 @@ def test_score_candidate_discovery_mode_allows_unknown_slice() -> None:
     assert "slice_discovery" in result.reasons
 
 
+def test_score_candidate_allows_scream_promoted_without_slice_stats() -> None:
+    result = score_candidate(
+        _candidate(symbol="XRP", side="DOWN", interval="5m", edge=0.09, threshold_price=100.0, hyperliquid_mid=99.0, scream_promoted=True),
+        slice_stats={},
+        features=MarketFeatures(hl_mid=99.0, momentum_1m_bps=-10.0, momentum_3m_bps=-20.0, momentum_5m_bps=-30.0),
+        config=ScoringConfig(base_stake_usdc=1.0, max_stake_usdc=3.0, min_score=1.0),
+    )
+
+    assert result.allowed is True
+    assert result.stake_usdc >= 1.0
+    assert "scream_edge" in result.reasons
+    assert "momentum_down" in result.reasons
+
+
 def test_score_candidate_penalizes_crowded_late_up_trade() -> None:
     result = score_candidate(
         _candidate(),

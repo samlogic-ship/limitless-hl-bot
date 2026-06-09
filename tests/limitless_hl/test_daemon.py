@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from limitless_hl.clients import LimitlessClient
-from limitless_hl.daemon import _build_runner, _filter_candidates, _load_slice_scores, _score_candidates
+from limitless_hl.daemon import _build_runner, _filter_candidates, _load_recent_open_slugs, _load_slice_scores, _score_candidates
 from limitless_hl.scorer import MarketFeatures, ScoringConfig, SliceStats
 from limitless_hl.risk import RiskConfig, RiskLedger, RiskManager
 
@@ -151,6 +151,45 @@ def test_filter_candidates_uses_slice_scores_when_available(tmp_path: Any) -> No
     filtered = _filter_candidates(candidates, symbols=set(), intervals=set(), sides=set(), slice_scores=scores)
 
     assert [row["slug"] for row in filtered] == ["btc-15"]
+
+
+def test_filter_candidates_allows_screaming_short_market_without_slice_score() -> None:
+    candidates = [
+        _fake_candidate(slug="xrp-5", seconds=600)
+        | {"symbol": "XRP", "interval": "5m", "side": "DOWN", "edge": 0.09},
+        _fake_candidate(slug="ada-1d", seconds=600)
+        | {"symbol": "ADA", "interval": "1d", "side": "UP", "edge": 0.20},
+        _fake_candidate(slug="eth-5", seconds=600)
+        | {"symbol": "ETH", "interval": "5m", "side": "UP", "edge": 0.03},
+    ]
+
+    filtered = _filter_candidates(
+        candidates,
+        symbols=set(),
+        intervals=set(),
+        sides=set(),
+        slice_scores=set(),
+        scream_promote=True,
+        scream_min_edge=0.08,
+        scream_intervals={"5M", "15M"},
+    )
+
+    assert [row["slug"] for row in filtered] == ["xrp-5"]
+    assert filtered[0]["scream_promoted"] is True
+
+
+def test_load_recent_open_slugs_persists_duplicate_guard_after_restart(tmp_path: Any) -> None:
+    log = tmp_path / "daemon_trades.jsonl"
+    log.write_text(
+        '{"event":"trade","ts_ms":1000,"candidate":{"slug":"btc-15","seconds_to_expiry":120}}\n'
+        '{"event":"trade","ts_ms":1000,"candidate":{"slug":"old","seconds_to_expiry":5}}\n',
+        encoding="utf-8",
+    )
+
+    open_slugs, expiries = _load_recent_open_slugs(log, now_ms=10_000)
+
+    assert open_slugs == {"btc-15"}
+    assert expiries["btc-15"] == 121_000
 
 
 def test_slice_scores_demote_seeded_slice_when_live_roi_degrades(tmp_path: Any) -> None:

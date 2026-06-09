@@ -100,7 +100,10 @@ def score_candidate(
     reasons: list[str] = []
     score = float(candidate.get("edge") or 0.0) * 10.0
 
-    if config.min_slice_n > 0:
+    if bool(candidate.get("scream_promoted")):
+        reasons.append("scream_edge")
+        score += 1.0
+    elif config.min_slice_n > 0:
         if stats is None or stats.n < config.min_slice_n or stats.roi < config.min_slice_roi or stats.win_rate < config.min_slice_win_rate:
             return _result(False, score, 0.0, "slice_not_promoted", reasons, features)
         reasons.append("slice_positive")

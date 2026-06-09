@@ -94,6 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shadow-min-n", type=int, default=20, help="Minimum resolved shadow trades before a slice can graduate")
     p.add_argument("--shadow-min-roi", type=float, default=0.10, help="Minimum shadow ROI required before live graduation")
     p.add_argument("--shadow-min-win-rate", type=float, default=0.52, help="Minimum shadow win rate required before live graduation")
+    p.add_argument("--scream-promote", action="store_true", help="Allow very high current-edge short markets to bypass slice-history gating")
+    p.add_argument("--scream-min-edge", type=float, default=0.08, help="Minimum current scan edge required for scream promotion")
+    p.add_argument("--scream-intervals", default="5m,15m", help="Comma-separated intervals eligible for scream promotion")
     p.add_argument("--scoring-live", action="store_true", help="Score live candidates with momentum/funding/basis features")
     p.add_argument("--score-min", type=float, default=1.0)
     p.add_argument("--score-base-stake-usdc", type=float, default=1.0)
@@ -258,8 +261,7 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Session-scoped mutable state
-    open_slugs: set[str] = set()
-    slug_expiry_ms: dict[str, int] = {}
+    open_slugs, slug_expiry_ms = _load_recent_open_slugs(out_path, now_ms=int(time.time() * 1000))
     realized_pnl: float = 0.0
 
     running = True
@@ -329,6 +331,9 @@ def main() -> None:
                 intervals=_parse_filter(args.intervals),
                 sides=_parse_filter(args.sides),
                 slice_scores=slice_scores,
+                scream_promote=args.scream_promote,
+                scream_min_edge=args.scream_min_edge,
+                scream_intervals=_parse_filter(args.scream_intervals),
             )
             if feature_provider is not None:
                 candidates, score_rejections = _score_candidates(
@@ -448,6 +453,37 @@ def _log(path: Path, payload: dict[str, Any]) -> None:
         fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def _load_recent_open_slugs(path: Path, *, now_ms: int) -> tuple[set[str], dict[str, int]]:
+    open_slugs: set[str] = set()
+    slug_expiry_ms: dict[str, int] = {}
+    if not path.exists():
+        return open_slugs, slug_expiry_ms
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()[-500:]
+    except Exception:
+        return open_slugs, slug_expiry_ms
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("event") != "trade":
+            continue
+        candidate = payload.get("candidate") or {}
+        slug = str(candidate.get("slug") or payload.get("slug") or "")
+        if not slug:
+            continue
+        ts_ms = int(payload.get("ts_ms") or 0)
+        seconds = int(candidate.get("seconds_to_expiry") or 0)
+        expiry_ms = ts_ms + seconds * 1000
+        if ts_ms > 0 and seconds > 0 and expiry_ms > now_ms:
+            open_slugs.add(slug)
+            slug_expiry_ms[slug] = max(slug_expiry_ms.get(slug, 0), expiry_ms)
+    return open_slugs, slug_expiry_ms
+
+
 def _parse_filter(raw: str) -> set[str]:
     return {item.strip().upper() for item in raw.split(",") if item.strip()}
 
@@ -463,9 +499,13 @@ def _filter_candidates(
     intervals: set[str],
     sides: set[str],
     slice_scores: set[tuple[str, str, str]] | None = None,
+    scream_promote: bool = False,
+    scream_min_edge: float = 0.0,
+    scream_intervals: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     out = []
     interval_filter = {item.lower() for item in intervals}
+    scream_interval_filter = {item.lower() for item in (scream_intervals or set())}
     for candidate in candidates:
         symbol = str(candidate.get("symbol") or "").upper()
         interval = str(candidate.get("interval") or "").lower()
@@ -476,8 +516,16 @@ def _filter_candidates(
             continue
         if sides and side not in sides:
             continue
+        scream_allowed = (
+            scream_promote
+            and interval in scream_interval_filter
+            and float(candidate.get("edge") or 0.0) >= scream_min_edge
+        )
         if slice_scores is not None and (interval, symbol, side) not in slice_scores:
-            continue
+            if not scream_allowed:
+                continue
+            candidate = dict(candidate)
+            candidate["scream_promoted"] = True
         out.append(candidate)
     return out
 

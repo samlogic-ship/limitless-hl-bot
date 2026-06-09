@@ -120,3 +120,58 @@ def test_parse_open_orders_filters_and_maps_sides():
     assert [o.order_id for o in orders] == ["a"]
     assert orders[0].side == "UP"
     assert abs(orders[0].size_usdc - 2.0) < 1e-9
+
+
+def test_inventory_parses_real_portfolio_shape(tmp_path):
+    from limitless_hl.maker import MakerEngine
+
+    class _PC:
+        def positions(self):
+            return {
+                "rewards": {},
+                "amm": [],
+                "group": [],
+                "clob": [
+                    {
+                        "market": {"slug": "doge-up-or-down-hourly-1", "closed": False, "expired": None},
+                        "positions": {"no": {"cost": "7998780"}, "yes": {"cost": "3999420"}},
+                        "tokensBalance": {"no": "15392000", "yes": "9306000"},
+                    },
+                    {
+                        "market": {"slug": "old-market", "closed": True},
+                        "positions": {"yes": {"cost": "9999999"}},
+                        "tokensBalance": {"yes": "1000000"},
+                    },
+                ],
+            }
+
+    engine = MakerEngine(
+        config=MakerConfig(),
+        limitless=None,
+        private_client=_PC(),
+        submitter=None,
+        pricing=None,
+        out_path=tmp_path / "maker.jsonl",
+    )
+    inv = engine._inventory_by_symbol({"doge-up-or-down-hourly-1": "DOGE"})
+    assert inv is not None
+    assert abs(inv["DOGE"] - (9.306 - 15.392) * 0.5) < 1e-9
+    assert abs(engine.held_cost_usdc - 11.9982) < 1e-3
+
+
+def test_inventory_unknown_on_garbage_payload(tmp_path):
+    from limitless_hl.maker import MakerEngine
+
+    class _PC:
+        def positions(self):
+            raise RuntimeError("api down")
+
+    engine = MakerEngine(
+        config=MakerConfig(),
+        limitless=None,
+        private_client=_PC(),
+        submitter=None,
+        pricing=None,
+        out_path=tmp_path / "maker.jsonl",
+    )
+    assert engine._inventory_by_symbol({}) is None

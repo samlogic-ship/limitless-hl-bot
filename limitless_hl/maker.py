@@ -270,6 +270,7 @@ class MakerEngine:
         self.live = live
         self._details_cache: dict[str, dict[str, Any]] = {}
         self._mids_session = requests.Session()
+        self.held_cost_usdc = 0.0
 
     # -- data ----------------------------------------------------------------
 
@@ -296,35 +297,43 @@ class MakerEngine:
         return out
 
     def _inventory_by_symbol(self, slug_symbols: dict[str, str]) -> dict[str, float] | None:
-        """Net UP-equivalent exposure in USDC per symbol. None = unknown (fail safe)."""
+        """Net UP-equivalent exposure in USDC per symbol. None = unknown (fail safe).
+
+        /portfolio/positions returns positions under the top-level "clob" array;
+        share counts live in tokensBalance.{yes,no} as raw 1e-6 units. Also records
+        gross cost of unresolved positions in tracked markets to self.held_cost_usdc
+        so the capital cap counts held inventory, not just resting orders.
+        """
         try:
             payload = self.private_client.positions()
         except Exception:
             return None
-        rows = payload if isinstance(payload, list) else (payload.get("data") or payload.get("positions") or [])
+        if isinstance(payload, list):
+            rows = payload
+        else:
+            rows = payload.get("clob") or payload.get("data") or payload.get("positions") or []
         inventory: dict[str, float] = {}
+        held_cost = 0.0
         try:
             for row in rows:
                 market = row.get("market") or {}
+                if market.get("closed") or market.get("expired"):
+                    continue
                 slug = str(market.get("slug") or row.get("marketSlug") or "")
                 symbol = slug_symbols.get(slug)
                 if symbol is None:
                     continue
-                outcome = row.get("outcomeIndex")
-                if outcome is None:
-                    outcome = row.get("outcome")
-                shares = float(
-                    row.get("contractsFormatted")
-                    or row.get("contracts")
-                    or row.get("size")
-                    or 0
-                )
-                if abs(shares) > 100_000:  # raw 1e-6 units
-                    shares /= 1_000_000
-                signed = shares if str(outcome) in {"0", "UP", "YES", "yes"} else -shares
-                inventory[symbol] = inventory.get(symbol, 0.0) + signed * 0.5  # ~USDC at mid
+                balances = row.get("tokensBalance") or {}
+                yes_shares = float(balances.get("yes") or 0) / 1_000_000
+                no_shares = float(balances.get("no") or 0) / 1_000_000
+                positions = row.get("positions") or {}
+                for side_key in ("yes", "no"):
+                    side = positions.get(side_key) or {}
+                    held_cost += float(side.get("cost") or 0) / 1_000_000
+                inventory[symbol] = inventory.get(symbol, 0.0) + (yes_shares - no_shares) * 0.5
         except Exception:
             return None
+        self.held_cost_usdc = held_cost
         return inventory
 
     # -- actions ---------------------------------------------------------------
@@ -434,7 +443,7 @@ class MakerEngine:
         cancels, posts = diff_orders(desired, open_orders, self.config.reprice_threshold)
 
         kept = [o for o in open_orders if o not in cancels]
-        while posts and locked_usdc(kept, posts) > self.config.max_total_locked_usdc:
+        while posts and locked_usdc(kept, posts) + self.held_cost_usdc > self.config.max_total_locked_usdc:
             dropped = posts.pop()
             self._log({"event": "post_dropped_capital_cap", "slug": dropped.slug, "side": dropped.side})
 

@@ -171,6 +171,27 @@ def test_slice_scores_demote_seeded_slice_when_live_roi_degrades(tmp_path: Any) 
     assert ("15m", "HYPE", "UP") not in scores
 
 
+def test_slice_scores_ignore_other_live_strategies(tmp_path: Any) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(
+        '{"resolved":[{"fill":{"slug":"doge-live","symbol":"DOGE","side":"DOWN",'
+        '"price":0.5,"stake_usdc":1,"raw":{"interval":"15m","strategy":"funding_kelly"}},'
+        '"won":true,"pnl_usdc":1.0}],"slices":[{"interval":"15m",'
+        '"symbol":"DOGE","side":"DOWN","strategy":"funding_kelly","n":4,"stake_usdc":4,"pnl_usdc":2.0}]}',
+        encoding="utf-8",
+    )
+
+    scores = _load_slice_scores(
+        report,
+        min_n=1,
+        min_roi=0.0,
+        min_win_rate=0.0,
+        allowed_strategies={"scored_daemon", "seed"},
+    )
+
+    assert scores == set()
+
+
 def test_score_candidates_updates_stake_and_explains_blocks() -> None:
     candidates = [
         _fake_candidate(slug="btc-15", seconds=600)

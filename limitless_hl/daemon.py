@@ -89,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--slice-min-win-rate", type=float, default=0.0)
     p.add_argument("--slice-live-min-n", type=int, default=4, help="Demote a seeded slice when live resolved sample is large enough and weak")
     p.add_argument("--slice-live-min-roi", type=float, default=0.0, help="Minimum live-only ROI required once live sample reaches --slice-live-min-n")
+    p.add_argument("--slice-strategies", default="scored_daemon,seed", help="Comma-separated learner strategies allowed to promote scored live daemon slices")
     p.add_argument("--scoring-live", action="store_true", help="Score live candidates with momentum/funding/basis features")
     p.add_argument("--score-min", type=float, default=1.0)
     p.add_argument("--score-base-stake-usdc", type=float, default=1.0)
@@ -297,8 +298,9 @@ def main() -> None:
                 min_win_rate=args.slice_min_win_rate,
                 live_min_n=args.slice_live_min_n,
                 live_min_roi=args.slice_live_min_roi,
+                allowed_strategies=_parse_strategy_filter(args.slice_strategies),
             )
-            slice_stats = _load_slice_stats(slice_score_path)
+            slice_stats = _load_slice_stats(slice_score_path, allowed_strategies=_parse_strategy_filter(args.slice_strategies))
 
         # Scan
         try:
@@ -432,6 +434,10 @@ def _parse_filter(raw: str) -> set[str]:
     return {item.strip().upper() for item in raw.split(",") if item.strip()}
 
 
+def _parse_strategy_filter(raw: str) -> set[str]:
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
 def _filter_candidates(
     candidates: list[dict[str, Any]],
     *,
@@ -466,6 +472,7 @@ def _load_slice_scores(
     min_win_rate: float,
     live_min_n: int = 0,
     live_min_roi: float = -1.0,
+    allowed_strategies: set[str] | None = None,
 ) -> set[tuple[str, str, str]]:
     if not path.exists():
         return set()
@@ -477,6 +484,8 @@ def _load_slice_scores(
     for row in payload.get("resolved") or []:
         fill = row.get("fill") or {}
         raw = fill.get("raw") or {}
+        if not _strategy_allowed(row, raw, allowed_strategies):
+            continue
         interval = str(raw.get("interval") or fill.get("interval") or "").lower()
         symbol = str(fill.get("symbol") or "").upper()
         side = str(fill.get("side") or "").upper()
@@ -496,13 +505,22 @@ def _load_slice_scores(
         if n >= min_n and roi >= min_roi and win_rate >= min_win_rate:
             allowed.add(key)
     if live_min_n > 0:
-        allowed -= _live_degraded_slices(payload, min_n=live_min_n, min_roi=live_min_roi)
+        allowed -= _live_degraded_slices(payload, min_n=live_min_n, min_roi=live_min_roi, allowed_strategies=allowed_strategies)
     return allowed
 
 
-def _live_degraded_slices(payload: dict[str, Any], *, min_n: int, min_roi: float) -> set[tuple[str, str, str]]:
+def _live_degraded_slices(
+    payload: dict[str, Any],
+    *,
+    min_n: int,
+    min_roi: float,
+    allowed_strategies: set[str] | None = None,
+) -> set[tuple[str, str, str]]:
     aggregates: dict[tuple[str, str, str], dict[str, float]] = {}
     for row in payload.get("slices") or []:
+        strategy = str(row.get("strategy") or "")
+        if allowed_strategies is not None and strategy not in allowed_strategies:
+            continue
         interval = str(row.get("interval") or "").lower()
         symbol = str(row.get("symbol") or "").upper()
         side = str(row.get("side") or "").upper()
@@ -521,7 +539,7 @@ def _live_degraded_slices(payload: dict[str, Any], *, min_n: int, min_roi: float
     return degraded
 
 
-def _load_slice_stats(path: Path) -> dict[tuple[str, str, str], SliceStats]:
+def _load_slice_stats(path: Path, *, allowed_strategies: set[str] | None = None) -> dict[tuple[str, str, str], SliceStats]:
     if not path.exists():
         return {}
     try:
@@ -532,6 +550,8 @@ def _load_slice_stats(path: Path) -> dict[tuple[str, str, str], SliceStats]:
     for row in payload.get("resolved") or []:
         fill = row.get("fill") or {}
         raw = fill.get("raw") or {}
+        if not _strategy_allowed(row, raw, allowed_strategies):
+            continue
         interval = str(raw.get("interval") or fill.get("interval") or "").lower()
         symbol = str(fill.get("symbol") or "").upper()
         side = str(fill.get("side") or "").upper()
@@ -551,6 +571,15 @@ def _load_slice_stats(path: Path) -> dict[tuple[str, str, str], SliceStats]:
         )
         for key, agg in aggregates.items()
     }
+
+
+def _strategy_allowed(row: dict[str, Any], raw: dict[str, Any], allowed_strategies: set[str] | None) -> bool:
+    if allowed_strategies is None:
+        return True
+    strategy = str(raw.get("strategy") or "")
+    if strategy:
+        return strategy in allowed_strategies
+    return "seed" in allowed_strategies
 
 
 def _score_candidates(

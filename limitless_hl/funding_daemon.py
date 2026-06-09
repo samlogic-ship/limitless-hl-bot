@@ -56,6 +56,30 @@ class FundingProofConfig:
     min_ev_pct: float = 0.10
     max_live_stake_usdc: float = 5.0
 
+
+def signal_key(signal: FundingSignal) -> str:
+    return f"{signal.coin}:{signal.direction}:{signal.compare}:{signal.threshold}"
+
+
+def first_spike_decision(
+    states: dict[str, bool],
+    signal: FundingSignal,
+    *,
+    triggered: bool,
+    allow_startup_active: bool = False,
+) -> tuple[bool, str]:
+    key = signal_key(signal)
+    previous = states.get(key)
+    if not triggered:
+        states[key] = False
+        return False, "not_triggered"
+    states[key] = True
+    if previous is None and not allow_startup_active:
+        return False, "startup_active_signal"
+    if previous:
+        return False, "sustained_signal"
+    return True, "first_spike"
+
 # Minimum edge after fee: entry_price <= backtest_wr * (1 - fee) - safety_margin
 # 300bps fee = 0.03; safety_margin = 0.02 extra cushion
 SIGNALS: list[FundingSignal] = [
@@ -347,6 +371,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-backtest-n",      type=int, default=1_000)
     p.add_argument("--maker-address",       type=str, default="",
                    help="Override wallet address for balance fetch (falls back to LIMITLESS_MAKER_ADDRESS env)")
+    p.add_argument("--first-spike-only",    action="store_true",
+                   help="Only act when a funding signal first enters the threshold; skip sustained cap runs")
+    p.add_argument("--allow-startup-active-signal", action="store_true",
+                   help="With --first-spike-only, allow already-active signals on daemon startup")
     return p
 
 
@@ -381,6 +409,7 @@ def main() -> None:
 
     open_coins: set[str] = set()      # coins with open bets (avoid doubles)
     coin_expiry_ms: dict[str, int] = {}
+    signal_states: dict[str, bool] = {}
     pause_file = out_path.parent / "funding_daemon.pause"
 
     running = True
@@ -437,7 +466,28 @@ def main() -> None:
             })
 
             if not triggered:
+                if args.first_spike_only:
+                    first_spike_decision(
+                        signal_states,
+                        sig,
+                        triggered=False,
+                        allow_startup_active=args.allow_startup_active_signal,
+                    )
                 continue
+            if args.first_spike_only:
+                first_ok, first_reason = first_spike_decision(
+                    signal_states,
+                    sig,
+                    triggered=True,
+                    allow_startup_active=args.allow_startup_active_signal,
+                )
+                if not first_ok:
+                    _log(out_path, {
+                        "event": "signal_skip_first_spike", "coin": sig.coin,
+                        "direction": sig.direction, "reason": first_reason,
+                        "rate": rate, "threshold": sig.threshold, "ts_ms": now_ms,
+                    })
+                    continue
             if sig.coin in open_coins:
                 continue  # already have an open bet
 

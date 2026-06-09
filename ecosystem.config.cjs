@@ -59,7 +59,7 @@ module.exports = {
       script: "bash",
       args: [
         "--noprofile", "--norc", "-c",
-        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.funding_daemon --min-stake-usdc 1 --loop-seconds 20 --min-seconds-to-expiry 120 --jsonl-out tmp/limitless_hl/funding_dry.jsonl`,
+        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.funding_daemon --min-stake-usdc 1 --first-spike-only --loop-seconds 20 --min-seconds-to-expiry 120 --jsonl-out tmp/limitless_hl/funding_dry.jsonl`,
       ],
       autorestart: true,
       restart_delay: 10000,

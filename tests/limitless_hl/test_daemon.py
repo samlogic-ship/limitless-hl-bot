@@ -4,7 +4,15 @@ from __future__ import annotations
 from typing import Any
 
 from limitless_hl.clients import LimitlessClient
-from limitless_hl.daemon import _build_runner, _filter_candidates, _load_recent_open_slugs, _load_slice_scores, _score_candidates
+from limitless_hl.daemon import (
+    _build_runner,
+    _filter_candidates,
+    _is_insufficient_collateral_error,
+    _is_rate_limited_error,
+    _load_recent_open_slugs,
+    _load_slice_scores,
+    _score_candidates,
+)
 from limitless_hl.scorer import MarketFeatures, ScoringConfig, SliceStats
 from limitless_hl.risk import RiskConfig, RiskLedger, RiskManager
 
@@ -190,6 +198,15 @@ def test_load_recent_open_slugs_persists_duplicate_guard_after_restart(tmp_path:
 
     assert open_slugs == {"btc-15"}
     assert expiries["btc-15"] == 121_000
+
+
+def test_error_classifiers_identify_rate_limits_and_collateral() -> None:
+    assert _is_rate_limited_error(Exception("429 Client Error: Too Many Requests"))
+    assert _is_rate_limited_error(Exception("rate limit exceeded"))
+    assert not _is_rate_limited_error(Exception("orderbook unavailable"))
+
+    assert _is_insufficient_collateral_error(Exception("Insufficient collateral balance for this order."))
+    assert not _is_insufficient_collateral_error(Exception("insufficient liquidity"))
 
 
 def test_slice_scores_demote_seeded_slice_when_live_roi_degrades(tmp_path: Any) -> None:

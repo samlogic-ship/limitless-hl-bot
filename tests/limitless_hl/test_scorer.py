@@ -88,6 +88,31 @@ def test_score_candidate_allows_scream_promoted_without_slice_stats() -> None:
     assert "momentum_down" in result.reasons
 
 
+def test_score_candidate_blocks_scream_up_when_regime_is_down() -> None:
+    result = score_candidate(
+        _candidate(symbol="BTC", side="UP", interval="5m", edge=0.12, scream_promoted=True),
+        slice_stats={},
+        features=MarketFeatures(hl_mid=99.0, momentum_1m_bps=-8.0, momentum_3m_bps=-20.0, momentum_5m_bps=-30.0),
+        config=ScoringConfig(base_stake_usdc=1.0, max_stake_usdc=1.0, min_score=1.0),
+    )
+
+    assert result.allowed is False
+    assert result.reason == "scream_regime_opposes_up"
+
+
+def test_score_candidate_allows_scream_down_when_regime_is_down() -> None:
+    result = score_candidate(
+        _candidate(symbol="BTC", side="DOWN", interval="5m", edge=0.12, threshold_price=100.0, hyperliquid_mid=99.0, scream_promoted=True),
+        slice_stats={},
+        features=MarketFeatures(hl_mid=99.0, momentum_1m_bps=-8.0, momentum_3m_bps=-20.0, momentum_5m_bps=-30.0),
+        config=ScoringConfig(base_stake_usdc=1.0, max_stake_usdc=1.0, min_score=1.0),
+    )
+
+    assert result.allowed is True
+    assert "scream_edge" in result.reasons
+    assert "momentum_down" in result.reasons
+
+
 def test_score_candidate_penalizes_crowded_late_up_trade() -> None:
     result = score_candidate(
         _candidate(),

@@ -104,13 +104,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--score-max-stake-usdc", type=float, default=3.0)
     p.add_argument("--hl-bot-status-file", default="", help="Optional hl_bot_status.json used as a soft scoring feature")
     p.add_argument("--hl-bot-status-max-age-ms", type=int, default=120_000)
+    # Loop
+    p.add_argument("--loop-seconds", type=int, default=20)
+    p.add_argument("--scan-error-backoff-seconds", type=int, default=120, help="Sleep this long after rate-limit scan errors")
     # Pricing
     p.add_argument("--flat-pricing", action="store_true",
                    help="Disable dynamic EWMA vol / reversal shade / spot ref; use flat config vol")
     p.add_argument("--book-log", default="",
                    help="Optional jsonl path: append per-scan orderbook snapshots for calibration studies")
-    # Loop
-    p.add_argument("--loop-seconds", type=int, default=20)
+    p.add_argument("--stop-on-insufficient-collateral", action="store_true", help="Stop live daemon after Limitless insufficient collateral")
     p.add_argument("--iterations", type=int, default=0, help="0 = run forever")
     # Output
     p.add_argument("--jsonl-out", default="tmp/limitless_hl/daemon_trades.jsonl")
@@ -371,7 +373,8 @@ def main() -> None:
             print(json.dumps({"event": "scan_error", "error": str(exc)}, sort_keys=True), flush=True)
             if args.iterations and iteration >= args.iterations:
                 break
-            time.sleep(max(args.loop_seconds, 1))
+            delay = args.scan_error_backoff_seconds if _is_rate_limited_error(exc) else args.loop_seconds
+            time.sleep(max(delay, 1))
             continue
 
         if not candidates:
@@ -418,11 +421,13 @@ def main() -> None:
             try:
                 result = runner.run(candidate)
             except Exception as exc:
+                fatal_error = args.live_armed and args.stop_on_insufficient_collateral and _is_insufficient_collateral_error(exc)
                 entry = {
                     "event": "trade_error",
                     "ts_ms": now_ms,
                     "slug": candidate["slug"],
                     "error": str(exc),
+                    "fatal": fatal_error,
                 }
                 _log(out_path, entry)
                 print(json.dumps(entry, sort_keys=True), flush=True)
@@ -430,6 +435,13 @@ def main() -> None:
                 open_slugs.add(candidate["slug"])
                 slug_expiry_ms[candidate["slug"]] = now_ms + int(candidate.get("seconds_to_expiry", 3600)) * 1000
                 traded = True
+                if fatal_error:
+                    _log(out_path, {
+                        "event": "circuit_breaker",
+                        "reason": "insufficient_collateral",
+                        "ts_ms": now_ms,
+                    })
+                    running = False
                 break
 
             entry = {
@@ -468,6 +480,16 @@ def main() -> None:
 def _log(path: Path, payload: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _is_rate_limited_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "too many requests" in text or "rate limit" in text
+
+
+def _is_insufficient_collateral_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "insufficient collateral" in text or "insufficient collateral balance" in text
 
 
 def _load_recent_open_slugs(path: Path, *, now_ms: int) -> tuple[set[str], dict[str, int]]:

@@ -101,6 +101,9 @@ def score_candidate(
     score = float(candidate.get("edge") or 0.0) * 10.0
 
     if bool(candidate.get("scream_promoted")):
+        aligned, reason = _scream_regime_aligned(side, features)
+        if not aligned:
+            return _result(False, score, 0.0, reason, reasons, features)
         reasons.append("scream_edge")
         score += 1.0
     elif config.min_slice_n > 0:
@@ -220,6 +223,16 @@ def _score_hl_bot_context(side: str, context: HlBotContext) -> tuple[float, str]
     if side == "DOWN" and (regime in {"LONG", "RISK_ON"} or breadth in {"BROADLY_UP", "RISK_ON"}):
         return -0.7, "hl_bot_opposing"
     return 0.0, "hl_bot_neutral"
+
+
+def _scream_regime_aligned(side: str, features: MarketFeatures) -> tuple[bool, str]:
+    m3 = features.momentum_3m_bps
+    m5 = features.momentum_5m_bps
+    if side == "UP" and m3 < 0 and m5 < 0:
+        return False, "scream_regime_opposes_up"
+    if side == "DOWN" and m3 > 0 and m5 > 0:
+        return False, "scream_regime_opposes_down"
+    return True, "scream_regime_aligned"
 
 
 def _fetch_hl_post(session: requests.Session, payload: dict[str, Any], timeout: int) -> Any:

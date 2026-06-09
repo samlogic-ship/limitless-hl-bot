@@ -74,7 +74,7 @@ TG_BASE = f"https://api.telegram.org/bot{TOKEN}"
 _last_sent: dict[str, float] = {}
 _COOLDOWNS: dict[str, float] = {
     "trade":  5.0,
-    "alert":  10.0,
+    "alert":  300.0,
     "cmd":    1.0,
     "startup": 30.0,
 }
@@ -516,10 +516,11 @@ def _push_event(e: dict[str, Any]) -> None:
         if _spam_ok("shutdown", "startup"):
             _send("🔴 <b>Daemon shut down.</b>")
 
-    elif ev in {"scan_error", "trade_error", "config_error"}:
-        if not _spam_ok(f"alert_{ev}", "alert"):
+    elif ev in {"scan_error", "trade_error", "config_error", "circuit_breaker"}:
+        err = (e.get("error") or e.get("reason") or "?")[:200]
+        key = f"alert_{ev}_{err[:80]}"
+        if not _spam_ok(key, "alert"):
             return
-        err = (e.get("error") or "?")[:200]
         _send(f"🚨 <b>{ev}</b>\n<code>{err}</code>")
 
 

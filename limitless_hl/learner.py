@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from .attribution import ResolvedMarket
 from .clients import LimitlessClient
+from .model import taker_buy_fee_rate
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,10 +222,26 @@ def resolve_pending(
     return resolved
 
 
+# Strategies whose entries are taker BUYs and therefore pay the Limitless
+# taker fee (charged in shares: you receive fewer contracts). Maker fills pay
+# zero and must stay gross.
+_TAKER_STRATEGIES_PREFIXES = (
+    "shadow_daemon", "scored_daemon", "copy_", "fade_", "funding", "shadow_funding",
+)
+
+
+def _is_taker_strategy(strategy: str) -> bool:
+    return strategy.startswith(_TAKER_STRATEGIES_PREFIXES)
+
+
 def resolve_trade(trade: LearnedTrade, market: ResolvedMarket, *, resolved_at_ms: int) -> LearnedResolution:
     winning_side = "UP" if market.winning_outcome_index == 0 else "DOWN"
     won = trade.side == winning_side
-    payout = trade.stake_usdc / trade.price if won else 0.0
+    shares = trade.stake_usdc / trade.price
+    if _is_taker_strategy(trade.strategy):
+        # Fee is deducted from contracts received; winners redeem net shares.
+        shares *= 1.0 - taker_buy_fee_rate(trade.price)
+    payout = shares if won else 0.0
     pnl = round(payout - trade.stake_usdc, 8)
     return LearnedResolution(trade=trade, market=market, won=won, pnl_usdc=pnl, resolved_at_ms=resolved_at_ms)
 

@@ -442,6 +442,35 @@ def main() -> None:
         except Exception as exc:
             print(json.dumps({"event": "learner_error", "error": str(exc)}, sort_keys=True), flush=True)
 
+        # Pipeline self-audit: a log file containing trade events must produce
+        # DB rows. A silent parser/routing gap (like copy_shadow on 2026-06-10)
+        # shows up here instead of as quietly missing data.
+        if iteration % 20 == 1:
+            for raw in logs:
+                try:
+                    log_path = Path(raw)
+                    if not log_path.exists():
+                        continue
+                    has_trades = any(
+                        '"event": "trade"' in line
+                        for line in log_path.read_text(encoding="utf-8").splitlines()[-400:]
+                    )
+                    if not has_trades:
+                        continue
+                    with connect(args.db) as audit_conn:
+                        n_rows = audit_conn.execute(
+                            "SELECT COUNT(*) FROM trades WHERE source_path = ?",
+                            (str(log_path),),
+                        ).fetchone()[0]
+                    if n_rows == 0:
+                        print(json.dumps({
+                            "event": "learner_warning",
+                            "warning": "log has trade events but zero ingested rows",
+                            "path": str(log_path),
+                        }, sort_keys=True), flush=True)
+                except Exception:
+                    pass
+
         if args.iterations and iteration >= args.iterations:
             break
         if running:

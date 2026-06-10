@@ -54,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-roi", type=float, default=0.05)
     p.add_argument("--min-pnl", type=float, default=20.0)
     p.add_argument("--max-avg-price", type=float, default=0.85)
+    p.add_argument("--fade-max-pnl", type=float, default=-50.0,
+                   help="Wallets at or below this realized PnL are fade candidates")
+    p.add_argument("--fade-max-roi", type=float, default=-0.30)
     p.add_argument("--min-seconds-to-expiry", type=int, default=120)
     p.add_argument("--max-chase", type=float, default=0.06)
     p.add_argument("--min-price", type=float, default=0.05)
@@ -70,7 +73,10 @@ def rank_wallets(
     min_roi: float,
     min_pnl: float,
     max_avg_price: float,
-) -> set[str]:
+    fade_max_pnl: float = -50.0,
+    fade_max_roi: float = -0.30,
+) -> tuple[set[str], set[str]]:
+    """Returns (sharks, fish): wallets to copy and wallets to bet against."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
     con.row_factory = sqlite3.Row
     try:
@@ -106,20 +112,19 @@ def rank_wallets(
         staked[acct] += max(cost, 0.0)
         mkts[acct].add(slug)
 
-    sharks = set()
+    sharks: set[str] = set()
+    fish: set[str] = set()
     for acct, p in pnl.items():
         st = staked[acct]
         n_px = px[acct][1]
-        if (
-            len(mkts[acct]) >= min_markets
-            and st > 0
-            and p >= min_pnl
-            and p / st >= min_roi
-            and n_px > 0
-            and px[acct][0] / n_px <= max_avg_price
-        ):
+        if len(mkts[acct]) < min_markets or st <= 0 or n_px <= 0:
+            continue
+        avg_px = px[acct][0] / n_px
+        if p >= min_pnl and p / st >= min_roi and avg_px <= max_avg_price:
             sharks.add(acct)
-    return sharks
+        elif p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price:
+            fish.add(acct)
+    return sharks, fish
 
 
 def _parse_iso_ms(value: str | None) -> int:
@@ -147,7 +152,7 @@ def _load_copied(path: Path) -> set[tuple[str, str]]:
         if r.get("event") == "trade":
             c = r.get("candidate") or {}
             if c.get("slug") and c.get("side"):
-                copied.add((c["slug"], c["side"]))
+                copied.add((c["slug"], c["side"], r.get("strategy") or "copy_shadow"))
     return copied
 
 
@@ -166,6 +171,7 @@ class CopyShadow:
         self.session.headers.update({"Accept": "application/json"})
         self.copied = _load_copied(self.out_path)
         self.sharks: set[str] = set()
+        self.fish: set[str] = set()
         self.fast_markets: list[dict[str, Any]] = []
         self.watermark: dict[str, int] = {}
         self.slow_seen_ms = int(time.time() * 1000)
@@ -212,7 +218,7 @@ class CopyShadow:
                 if int(row.get("side") or 0) != 0:  # buys only
                     continue
                 acct = str((row.get("profile") or {}).get("account") or "").lower()
-                if acct not in self.sharks:
+                if acct not in self.sharks and acct not in self.fish:
                     continue
                 token_id = str(row.get("tokenId") or "")
                 outcome = (
@@ -224,15 +230,16 @@ class CopyShadow:
                     continue
                 try:
                     price = float(row.get("price") or 0)
+                    stake = float(row.get("matchedSize") or 0) / 1_000_000 * price
                 except (TypeError, ValueError):
                     continue
                 if price <= 0:
                     continue
                 hits.append({
                     "account": acct, "market_slug": m["slug"], "outcome": outcome,
-                    "price": price, "created_at_ms": created_ms, "symbol": m["symbol"],
-                    "interval": m["interval"], "expiration_ms": m["expiration_ms"],
-                    "via": "fast",
+                    "price": price, "stake": stake, "created_at_ms": created_ms,
+                    "symbol": m["symbol"], "interval": m["interval"],
+                    "expiration_ms": m["expiration_ms"], "via": "fast",
                 })
             self.watermark[m["slug"]] = newest
             time.sleep(0.05)
@@ -245,7 +252,7 @@ class CopyShadow:
             con.row_factory = sqlite3.Row
             try:
                 rows = con.execute(
-                    "SELECT t.account, t.market_slug, t.outcome, t.price, t.created_at_ms,"
+                    "SELECT t.account, t.market_slug, t.outcome, t.price, t.collateral, t.created_at_ms,"
                     "       m.symbol, m.interval, m.expiration_ms "
                     "FROM trades t JOIN markets m ON m.slug = t.market_slug "
                     "WHERE t.created_at_ms > ? AND t.side = 0 "
@@ -262,13 +269,18 @@ class CopyShadow:
             self.slow_seen_ms = max(self.slow_seen_ms, t["created_at_ms"])
             if t["interval"] in FAST_INTERVALS:  # fast path owns these
                 continue
-            if t["account"] in self.sharks:
-                hits.append({**dict(t), "via": "slow"})
+            if t["account"] in self.sharks or t["account"] in self.fish:
+                hits.append({**dict(t), "stake": t["collateral"], "via": "slow"})
         return hits
 
     def try_copy(self, hit: dict[str, Any], now_ms: int) -> None:
         a = self.args
-        key = (hit["market_slug"], hit["outcome"])
+        is_fade = hit["account"] in self.fish
+        strategy = "fade_shadow" if is_fade else "copy_shadow"
+        our_side = (
+            ("DOWN" if hit["outcome"] == "UP" else "UP") if is_fade else hit["outcome"]
+        )
+        key = (hit["market_slug"], our_side, strategy)
         if key in self.copied:
             return
         secs_left = (hit["expiration_ms"] - now_ms) / 1000
@@ -282,15 +294,17 @@ class CopyShadow:
             _log(self.out_path, {"event": "copy_skip", "reason": "book_error",
                                  "slug": hit["market_slug"], "error": str(exc), "ts_ms": now_ms})
             return
-        ask = book.up_ask if hit["outcome"] == "UP" else book.down_ask
+        ask = book.up_ask if our_side == "UP" else book.down_ask
+        # reference for the chase guard: the signal price on OUR side
+        ref_px = (1 - hit["price"]) if is_fade else hit["price"]
         if not ask or not (a.min_price <= ask <= a.max_price):
             _log(self.out_path, {"event": "copy_skip", "reason": "price_out_of_band",
                                  "slug": hit["market_slug"], "ask": ask, "ts_ms": now_ms})
             return
-        if ask > hit["price"] + a.max_chase:
+        if ask > ref_px + a.max_chase:
             _log(self.out_path, {"event": "copy_skip", "reason": "chased_too_far",
                                  "slug": hit["market_slug"], "shark_px": hit["price"],
-                                 "ask": ask, "ts_ms": now_ms})
+                                 "ref_px": ref_px, "ask": ask, "ts_ms": now_ms})
             return
         self.copied.add(key)
         detect_lag_s = max(0.0, (now_ms - hit["created_at_ms"]) / 1000)
@@ -298,21 +312,23 @@ class CopyShadow:
             "event": "trade",
             "mode": "dry_run",
             "state": "hedged",
-            "strategy": "copy_shadow",
+            "strategy": strategy,
             "candidate": {
                 "slug": hit["market_slug"],
                 "symbol": hit["symbol"],
                 "interval": hit["interval"],
-                "side": hit["outcome"],
+                "side": our_side,
                 "limit_price": ask,
                 "stake_usdc": a.stake_usdc,
                 "seconds_to_expiry": int(secs_left),
                 "reason": (
-                    f"copy {hit['account'][:10]} {hit['outcome']} via={hit['via']} "
-                    f"lag={detect_lag_s:.1f}s shark_px={hit['price']:.3f} our_ask={ask:.3f}"
+                    f"{strategy.split('_')[0]} {hit['account'][:10]} signal={hit['outcome']} "
+                    f"via={hit['via']} lag={detect_lag_s:.1f}s "
+                    f"signal_px={hit['price']:.3f} our_ask={ask:.3f}"
                 ),
                 "shark": hit["account"],
                 "shark_price": hit["price"],
+                "shark_stake_usdc": round(float(hit.get("stake") or 0.0), 2),
                 "detect_lag_s": round(detect_lag_s, 1),
                 "via": hit["via"],
             },
@@ -347,15 +363,18 @@ def main() -> None:
 
         if time.time() - ranked_at >= args.rank_seconds:
             try:
-                cs.sharks = rank_wallets(
+                cs.sharks, cs.fish = rank_wallets(
                     args.flow_db,
                     min_markets=args.min_markets,
                     min_roi=args.min_roi,
                     min_pnl=args.min_pnl,
                     max_avg_price=args.max_avg_price,
+                    fade_max_pnl=args.fade_max_pnl,
+                    fade_max_roi=args.fade_max_roi,
                 )
                 ranked_at = time.time()
-                _log(cs.out_path, {"event": "leaderboard", "sharks": len(cs.sharks), "ts_ms": now_ms})
+                _log(cs.out_path, {"event": "leaderboard", "sharks": len(cs.sharks),
+                                   "fish": len(cs.fish), "ts_ms": now_ms})
             except Exception as exc:
                 _log(cs.out_path, {"event": "rank_error", "error": str(exc), "ts_ms": now_ms})
 

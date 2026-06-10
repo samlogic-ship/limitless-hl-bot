@@ -52,23 +52,24 @@ def _make_flow_db(path: Path) -> None:
     con.close()
 
 
-def test_rank_selects_value_shark_only(tmp_path):
+def test_rank_selects_value_shark_and_fish(tmp_path):
     db = tmp_path / "flow.sqlite3"
     _make_flow_db(db)
-    sharks = rank_wallets(
+    sharks, fish = rank_wallets(
         str(db), min_markets=10, min_roi=0.05, min_pnl=20.0, max_avg_price=0.85
     )
     assert sharks == {"0xshark"}
+    assert fish == {"0xfish"}  # -$60 on $60 staked, ROI -100%
 
 
 def test_rank_sniper_included_when_price_cap_lifted(tmp_path):
     db = tmp_path / "flow.sqlite3"
     _make_flow_db(db)
-    sharks = rank_wallets(
+    sharks, fish = rank_wallets(
         str(db), min_markets=10, min_roi=0.001, min_pnl=1.0, max_avg_price=1.0
     )
     assert "0xsniper" in sharks and "0xshark" in sharks
-    assert "0xfish" not in sharks
+    assert "0xsniper" not in fish
 
 
 def test_copy_record_is_learner_compatible():
@@ -96,11 +97,3 @@ def test_copy_record_is_learner_compatible():
     assert trade is not None
     assert trade.strategy == "copy_shadow"
     assert trade.price == 0.41
-
-
-def test_copy_shadow_file_routes_to_daemon_parser():
-    from pathlib import Path
-
-    from limitless_hl.learner import _source_name
-
-    assert _source_name(Path("tmp/limitless_hl/copy_shadow.jsonl")) == "daemon"

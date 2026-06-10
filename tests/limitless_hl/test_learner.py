@@ -117,7 +117,7 @@ def test_run_once_resolves_trades_and_writes_daemon_compatible_report(tmp_path: 
 
     assert report["resolved_count"] == 2
     assert report["wins"] == 2
-    assert report["realized_pnl_usdc"] == 4.0
+    assert report["realized_pnl_usdc"] == 3.79  # net of 3% taker fee (was 4.0 gross)
     assert report_path.exists()
 
     scores = _load_slice_scores(report_path, min_n=1, min_roi=0.01, min_win_rate=0.5)

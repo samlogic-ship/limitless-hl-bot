@@ -166,6 +166,7 @@ def main() -> None:
         "model": flag_dir / "gate_model_live.flag",
     }
     live_strat = {"copy": "copy_live", "fade": "fade_live", "model": "scored_daemon"}
+    fail_streak: dict[str, int] = {"copy": 0, "fade": 0, "model": 0}
     paper_strat = {"copy": "copy_shadow", "fade": "fade_shadow", "model": "shadow_daemon"}
 
     _log(out_path, {"event": "startup", "ts_ms": int(time.time() * 1000)})
@@ -214,6 +215,28 @@ def main() -> None:
                                 f"(per-trade {st['per_trade']:+.3f}). $1 stakes, "
                                 "daily-loss stop active."
                             )
+
+                        # Re-close a gate whose cumulative stats no longer
+                        # pass (2 consecutive failing evaluations = hysteresis
+                        # against flapping). Fee-accounting fix 2026-06-10
+                        # showed an open gate can become unjustified.
+                        if flag.exists() and not info["passed"]:
+                            fail_streak[lane] += 1
+                            if fail_streak[lane] >= 2:
+                                flag.unlink()
+                                if lane == "model" and args.manage_model_pm2:
+                                    subprocess.run(["pm2", "stop", "limitless-hl-live"],
+                                                   capture_output=True, timeout=30)
+                                _log(out_path, {"event": "gate_closed", "lane": lane,
+                                                **st, "ts_ms": now_ms})
+                                tg_send(
+                                    f"GATE CLOSED: {lane} lane no longer passes "
+                                    f"(n={st['n']} per-trade {st['per_trade']:+.3f}). "
+                                    "Back to paper."
+                                )
+                                fail_streak[lane] = 0
+                        elif info["passed"]:
+                            fail_streak[lane] = 0
 
                         # Divergence pause for open gates
                         if flag.exists():

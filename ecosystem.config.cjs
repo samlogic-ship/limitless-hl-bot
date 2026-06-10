@@ -12,12 +12,27 @@ const LIMITLESS_ENV = [
 module.exports = {
   apps: [
     {
+      // Read-only trade-flow recorder + wallet scorer. No keys, no orders.
+      name: "limitless-hl-flow",
+      cwd: ROOT,
+      script: "bash",
+      args: [
+        "--noprofile", "--norc", "-c",
+        `"${PYTHON}" -m limitless_hl.flow_recorder --loop-seconds 60 --score-every-loops 15 --db tmp/limitless_hl/flow.sqlite3 --scores-out tmp/limitless_hl/shark_scores.json --jsonl-out tmp/limitless_hl/flow_recorder.jsonl`,
+      ],
+      autorestart: true,
+      restart_delay: 10000,
+      max_restarts: 20,
+      time: true,
+      vizion: false,
+    },
+    {
       name: "limitless-hl-live",
       cwd: ROOT,
       script: "bash",
       args: [
         "--noprofile", "--norc", "-c",
-        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.daemon --live-armed --allow-unhedged-live --intervals 5m,15m --sides UP,DOWN --slice-score-file tmp/limitless_hl/evaluation_report_live.json --slice-min-n 3 --slice-min-roi 0.02 --slice-min-win-rate 0.25 --slice-live-min-n 4 --slice-live-min-roi 0.0 --shadow-graduate --shadow-min-n 20 --shadow-min-roi 0.10 --shadow-min-win-rate 0.52 --scream-promote --scream-min-edge 0.07 --scream-intervals 5m,15m --scoring-live --score-min 1.0 --score-base-stake-usdc 1 --score-max-stake-usdc 1 --hl-bot-status-file /opt/hyperliquid-bot/hl_bot_status.json --min-edge 0.03 --max-price 0.88 --min-seconds-to-expiry 90 --stake-usdc 1 --max-daily-loss-usdc 3 --max-open-markets 2 --loop-seconds 30 --scan-error-backoff-seconds 120 --stop-on-insufficient-collateral --jsonl-out tmp/limitless_hl/daemon_trades.jsonl`,
+        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.daemon --live-armed --allow-unhedged-live --intervals 5m,15m --sides UP,DOWN --slice-score-file tmp/limitless_hl/evaluation_report_live.json --slice-min-n 3 --slice-min-roi 0.02 --slice-min-win-rate 0.25 --slice-live-min-n 4 --slice-live-min-roi 0.0 --shadow-graduate --shadow-min-n 20 --shadow-min-roi 0.10 --shadow-min-win-rate 0.52 --scream-promote --scream-min-edge 0.07 --scream-intervals 5m,15m --scoring-live --score-min 1.0 --score-base-stake-usdc 1 --score-max-stake-usdc 1 --hl-bot-status-file /opt/hyperliquid-bot/hl_bot_status.json --min-edge 0.03 --max-price 0.88 --min-seconds-to-expiry 90 --stake-usdc 1 --max-daily-loss-usdc 3 --max-open-markets 2 --loop-seconds 30 --scan-error-backoff-seconds 120 --stop-on-insufficient-collateral --book-log tmp/limitless_hl/book_snapshots.jsonl --jsonl-out tmp/limitless_hl/daemon_trades.jsonl`,
       ],
       autorestart: true,
       restart_delay: 10000,

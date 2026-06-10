@@ -22,7 +22,7 @@ import json
 import os
 import signal as _signal
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +38,21 @@ from .live_trade import (
 )
 from .model import LimitlessMarket, OrderBook, estimate_binary_probability
 from .secrets import get_secret
+from .polymarket_feed import PolymarketFeed
 from .volatility import PricingProvider
 
 BASE_URL = "https://api.limitless.exchange"
 PRICE_TICK = 0.01
+
+
+def _iso_to_ms(value: Any) -> int:
+    if not value:
+        return 0
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +74,15 @@ class MakerConfig:
     max_total_locked_usdc: float = 14.0
     inventory_skew: float = 0.04
     max_markets: int = 5
+    # Polymarket twin blend weight for fair value (0 = model only). The house
+    # prices its isPolyArbitrage lanes against Polymarket, so quoting blind to
+    # it is quoting against the counterparty's own reference.
+    polymarket_blend: float = 0.0
+    # Adverse-selection cooling-off: when a known shark hits one of our resting
+    # quotes, widen that symbol's margin for a window instead of re-quoting
+    # straight into the same flow.
+    shark_caution_margin: float = 0.03
+    shark_caution_seconds: int = 600
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +280,8 @@ class MakerEngine:
         pricing: PricingProvider,
         out_path: Path,
         live: bool = False,
+        polymarket: Any | None = None,
+        shark_file: Path | None = None,
     ):
         self.config = config
         self.limitless = limitless
@@ -271,6 +293,13 @@ class MakerEngine:
         self._details_cache: dict[str, dict[str, Any]] = {}
         self._mids_session = requests.Session()
         self.held_cost_usdc = 0.0
+        self.polymarket = polymarket
+        self.shark_file = shark_file
+        self._sharks: set[str] = set()
+        self._sharks_loaded_at = 0.0
+        self._caution_until: dict[str, float] = {}
+        self._prev_open: dict[str, OpenOrder] = {}
+        self._last_loop_ms = int(time.time() * 1000)
 
     # -- data ----------------------------------------------------------------
 
@@ -335,6 +364,67 @@ class MakerEngine:
             return None
         self.held_cost_usdc = held_cost
         return inventory
+
+    # -- flow awareness ---------------------------------------------------------
+
+    def _load_sharks(self) -> None:
+        """Refresh the shark set from the flow recorder's leaderboard, hourly."""
+        if self.shark_file is None:
+            return
+        now = time.time()
+        if now - self._sharks_loaded_at < 3600:
+            return
+        self._sharks_loaded_at = now
+        try:
+            data = json.loads(Path(self.shark_file).read_text())
+            self._sharks = {str(a).lower() for a in (data.get("sharks") or [])}
+        except Exception:
+            pass  # keep the previous set; an unreadable file must not stop quoting
+
+    def _recent_event_accounts(self, slug: str, since_ms: int, price: float) -> set[str]:
+        """Accounts that traded this market near `price` since `since_ms`."""
+        try:
+            resp = requests.get(
+                f"{BASE_URL}/markets/{slug}/events",
+                params={"page": 1, "limit": 20},
+                timeout=6,
+            )
+            rows = resp.json().get("events") or []
+        except Exception:
+            return set()
+        out: set[str] = set()
+        for row in rows:
+            try:
+                ts = _iso_to_ms(row.get("createdAt"))
+                px = float(row.get("price") or 0)
+            except Exception:
+                continue
+            if ts >= since_ms and abs(px - price) <= 0.011:
+                account = str((row.get("profile") or {}).get("account") or "").lower()
+                if account:
+                    out.add(account)
+        return out
+
+    def _watch_fills(self, open_orders: list[OpenOrder], slug_symbols: dict[str, str]) -> None:
+        """A resting order that vanished without our cancel was filled (or
+        externally removed). If a known shark printed at our price since the
+        last loop, start a cooling-off window on that symbol."""
+        if not self._prev_open:
+            return
+        current_ids = {o.order_id for o in open_orders}
+        for oid, order in self._prev_open.items():
+            if oid in current_ids:
+                continue
+            symbol = slug_symbols.get(order.slug)
+            accounts = self._recent_event_accounts(order.slug, self._last_loop_ms, order.price)
+            hit = accounts & self._sharks
+            if hit and symbol:
+                self._caution_until[symbol] = time.time() + self.config.shark_caution_seconds
+                self._log({"event": "shark_fill_caution", "slug": order.slug, "symbol": symbol,
+                           "side": order.side, "price": order.price, "sharks": sorted(hit)})
+            else:
+                self._log({"event": "order_vanished", "slug": order.slug, "side": order.side,
+                           "price": order.price, "counterparties": len(accounts)})
 
     # -- actions ---------------------------------------------------------------
 
@@ -441,9 +531,25 @@ class MakerEngine:
                 side="UP",
                 up_probability_shade=shade,
             )
+            pm = None
+            if self.polymarket is not None and self.config.polymarket_blend > 0:
+                try:
+                    pm = self.polymarket.implied_up_prob(
+                        market.symbol, market.interval, market.expiration_ms
+                    )
+                except Exception:
+                    pm = None
+            if pm is not None:
+                w = min(max(self.config.polymarket_blend, 0.0), 1.0)
+                fair_up = (1.0 - w) * fair_up + w * float(pm["up_prob"])
+            market_config = self.config
+            if self._caution_until.get(market.symbol, 0.0) > time.time():
+                market_config = replace(
+                    self.config, margin=self.config.margin + self.config.shark_caution_margin
+                )
             desired.extend(
                 compute_quotes(
-                    market, book, fair_up, inventory.get(market.symbol, 0.0), self.config, seconds
+                    market, book, fair_up, inventory.get(market.symbol, 0.0), market_config, seconds
                 )
             )
             try:
@@ -454,6 +560,8 @@ class MakerEngine:
                 # Unknown open state on this market — do not quote it this loop.
                 desired = [p for p in desired if p.slug != market.slug]
 
+        self._load_sharks()
+        self._watch_fills(open_orders, slug_symbols)
         cancels, posts = diff_orders(desired, open_orders, self.config.reprice_threshold)
 
         kept = [o for o in open_orders if o not in cancels]
@@ -482,7 +590,10 @@ class MakerEngine:
             "cancels": len(cancels),
             "posts": len(posts),
             "inventory": inventory,
+            "caution": sorted(s for s, t in self._caution_until.items() if t > time.time()),
         })
+        self._prev_open = {o.order_id: o for o in kept}
+        self._last_loop_ms = now_ms
         return {"quoted": len(desired), "cancels": len(cancels), "posts": len(posts)}
 
 
@@ -500,6 +611,12 @@ def _compact(result: dict[str, Any]) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Limitless passive maker daemon")
+    p.add_argument("--polymarket-blend", type=float, default=0.0,
+                   help="blend weight for the Polymarket twin's implied prob in fair value (0=off)")
+    p.add_argument("--shark-file", default="tmp/limitless_hl/shark_scores.json",
+                   help="flow-recorder leaderboard for adverse-selection caution (empty to disable)")
+    p.add_argument("--shark-caution-margin", type=float, default=0.03)
+    p.add_argument("--shark-caution-seconds", type=int, default=600)
     p.add_argument("--live-armed", action="store_true")
     p.add_argument("--intervals", default="1h")
     p.add_argument("--symbols", default="BTC,ETH,SOL,HYPE,BNB,DOGE,XRP")
@@ -526,6 +643,9 @@ def main(argv: list[str] | None = None) -> None:
         max_inventory_usdc_per_symbol=args.max_inventory_usdc,
         max_markets=args.max_markets,
         min_seconds_to_expiry=args.min_seconds_to_expiry,
+        polymarket_blend=args.polymarket_blend,
+        shark_caution_margin=args.shark_caution_margin,
+        shark_caution_seconds=args.shark_caution_seconds,
     )
     token_id = get_secret("LIMITLESS_TOKEN_ID") or ""
     token_secret = get_secret("LIMITLESS_TOKEN_SECRET") or ""
@@ -558,6 +678,8 @@ def main(argv: list[str] | None = None) -> None:
         pricing=PricingProvider(),
         out_path=out_path,
         live=args.live_armed,
+        polymarket=PolymarketFeed() if args.polymarket_blend > 0 else None,
+        shark_file=Path(args.shark_file) if args.shark_file else None,
     )
 
     running = True

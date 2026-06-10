@@ -39,11 +39,16 @@ class LimitlessHyperliquidScanner:
         hyperliquid: HyperliquidLike,
         config: EdgeConfig,
         pricing: PricingLike | None = None,
+        polymarket: Any | None = None,
     ):
         self.limitless = limitless
         self.hyperliquid = hyperliquid
         self.config = config
         self.pricing = pricing
+        # Optional PolymarketFeed: adds the twin market's implied probability to
+        # every books row (book_snapshots.jsonl) so the signal accrues history
+        # for free, and lets the daemon gate candidates against it.
+        self.polymarket = polymarket
 
     def scan(self, now_ms: int | None = None) -> list[Candidate]:
         return [Candidate(**row) for row in self.scan_report(now_ms=now_ms)["candidates"]]
@@ -74,6 +79,14 @@ class LimitlessHyperliquidScanner:
                     ref = self.pricing.ref_price(market.symbol, mid, resolution)
                 except Exception:
                     vol = shade = ref = None
+            pm = None
+            if self.polymarket is not None:
+                try:
+                    pm = self.polymarket.implied_up_prob(
+                        market.symbol, market.interval, market.expiration_ms
+                    )
+                except Exception:
+                    pm = None
             books.append({
                 "ts_ms": now,
                 "slug": market.slug,
@@ -85,6 +98,8 @@ class LimitlessHyperliquidScanner:
                 "down_bid": book.down_bid, "down_ask": book.down_ask,
                 "up_ask_size": book.up_ask_size, "down_ask_size": book.down_ask_size,
                 "hl_mid": mid, "ref_price": ref, "vol": vol, "shade": shade,
+                "pm_up_prob": pm.get("up_prob") if pm else None,
+                "pm_spread": pm.get("spread") if pm else None,
             })
             candidate = choose_candidate(
                 market=market,

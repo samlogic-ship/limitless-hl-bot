@@ -29,6 +29,7 @@ from .live_trade import (
 )
 from .model import EdgeConfig
 from .risk import RiskConfig, RiskLedger, RiskManager
+from .polymarket_feed import PolymarketFeed
 from .scanner import LimitlessHyperliquidScanner
 from .volatility import PricingProvider
 from .scorer import LiveFeatureProvider, ScoringConfig, SliceStats, load_hl_bot_context, score_candidate
@@ -116,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--iterations", type=int, default=0, help="0 = run forever")
     # Output
     p.add_argument("--jsonl-out", default="tmp/limitless_hl/daemon_trades.jsonl")
+    p.add_argument(
+        "--polymarket-gate-threshold", type=float, default=0.0,
+        help="Block a candidate when our model's side-probability exceeds the "
+             "Polymarket twin's implied probability by more than this "
+             "(0 disables the gate; the signal is always recorded in books).",
+    )
     return p
 
 
@@ -247,6 +254,7 @@ def main() -> None:
             min_size_usdc=args.stake_usdc,  # only require liquidity >= our stake
         ),
         pricing=pricing,
+        polymarket=PolymarketFeed(),
     )
     risk = RiskManager(RiskConfig(
         max_daily_loss_usdc=args.max_daily_loss_usdc,
@@ -368,6 +376,19 @@ def main() -> None:
                 )
                 for rejection in score_rejections:
                     _log(out_path, {"event": "score_blocked", **rejection, "ts_ms": now_ms})
+            candidates, pm_blocked = _polymarket_gate(
+                candidates, report.get("books") or [], args.polymarket_gate_threshold
+            )
+            for cand in pm_blocked:
+                _log(out_path, {
+                    "event": "polymarket_blocked",
+                    "slug": cand.get("slug"),
+                    "side": cand.get("side"),
+                    "model_prob": cand.get("fair_probability"),
+                    "pm_side_prob": cand.get("pm_side_prob"),
+                    "threshold": args.polymarket_gate_threshold,
+                    "ts_ms": now_ms,
+                })
         except Exception as exc:
             _log(out_path, {"event": "scan_error", "error": str(exc), "ts_ms": now_ms})
             print(json.dumps({"event": "scan_error", "error": str(exc)}, sort_keys=True), flush=True)
@@ -567,6 +588,41 @@ def _filter_candidates(
             candidate["scream_promoted"] = True
         out.append(candidate)
     return out
+
+
+def _polymarket_gate(
+    candidates: list[dict[str, Any]],
+    books: list[dict[str, Any]],
+    threshold: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Drop candidates whose model probability is more optimistic than the
+    Polymarket twin by more than `threshold` on the candidate's side.
+
+    Polymarket only ever VETOES (model too hot vs the bigger venue); when it is
+    more optimistic than us, or has no twin/usable book, the candidate passes.
+    Blocked rows come back annotated with pm_side_prob for logging.
+    """
+    if threshold <= 0:
+        return candidates, []
+    pm_by_slug = {
+        row.get("slug"): row.get("pm_up_prob")
+        for row in books
+        if row.get("pm_up_prob") is not None
+    }
+    kept: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    for cand in candidates:
+        pm_up = pm_by_slug.get(cand.get("slug"))
+        if pm_up is None:
+            kept.append(cand)
+            continue
+        side_prob = pm_up if cand.get("side") == "UP" else 1.0 - pm_up
+        model_prob = float(cand.get("fair_probability") or 0.0)
+        if model_prob - side_prob > threshold:
+            blocked.append({**cand, "pm_side_prob": side_prob})
+        else:
+            kept.append(cand)
+    return kept, blocked
 
 
 def _load_slice_scores(

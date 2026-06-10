@@ -65,6 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fade-max-pnl", type=float, default=-50.0,
                    help="Wallets at or below this realized PnL are fade candidates")
     p.add_argument("--fade-max-roi", type=float, default=-0.30)
+    p.add_argument("--max-sharks", type=int, default=12,
+                   help="Cap the copy leaderboard to the top N wallets by PnL; "
+                        "the 2026-06-10 expansion to 38 sharks diluted edge")
     p.add_argument("--min-seconds-to-expiry", type=int, default=120)
     p.add_argument("--max-chase", type=float, default=0.06)
     p.add_argument("--min-price", type=float, default=0.05)
@@ -93,6 +96,7 @@ def rank_wallets(
     max_avg_price: float,
     fade_max_pnl: float = -50.0,
     fade_max_roi: float = -0.30,
+    max_sharks: int = 12,
 ) -> tuple[set[str], set[str]]:
     """Returns (sharks, fish): wallets to copy and wallets to bet against."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
@@ -130,7 +134,7 @@ def rank_wallets(
         staked[acct] += max(cost, 0.0)
         mkts[acct].add(slug)
 
-    sharks: set[str] = set()
+    shark_rank: list[tuple[float, str]] = []
     fish: set[str] = set()
     for acct, p in pnl.items():
         st = staked[acct]
@@ -139,9 +143,11 @@ def rank_wallets(
             continue
         avg_px = px[acct][0] / n_px
         if p >= min_pnl and p / st >= min_roi and avg_px <= max_avg_price:
-            sharks.add(acct)
+            shark_rank.append((p, acct))
         elif p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price:
             fish.add(acct)
+    shark_rank.sort(reverse=True)
+    sharks = {acct for _, acct in shark_rank[:max_sharks]}
     return sharks, fish
 
 
@@ -195,6 +201,7 @@ class LiveExecutor:
         self.client = LimitlessClient()
         self.submitter: LimitlessSubmitter | None = None
         self.disabled_reason: str | None = None
+        self.disabled_at: float = 0.0
         self.sent_today = self._count_sent_today()
 
     def _count_sent_today(self) -> int:
@@ -217,8 +224,11 @@ class LiveExecutor:
     def _ensure_submitter(self) -> bool:
         if self.submitter is not None:
             return True
-        if self.disabled_reason:
+        # A setup failure (missing env, transient error) retries after 10min
+        # instead of silently disabling live trading forever.
+        if self.disabled_reason and time.time() - self.disabled_at < 600:
             return False
+        self.disabled_reason = None
         try:
             token_id = get_secret("LIMITLESS_TOKEN_ID")
             token_secret = get_secret("LIMITLESS_TOKEN_SECRET")
@@ -243,6 +253,7 @@ class LiveExecutor:
             return True
         except Exception as exc:
             self.disabled_reason = str(exc)
+            self.disabled_at = time.time()
             _log(self.out_path, {"event": "live_disabled", "error": str(exc),
                                  "ts_ms": int(time.time() * 1000)})
             return False
@@ -529,6 +540,7 @@ def main() -> None:
                     max_avg_price=args.max_avg_price,
                     fade_max_pnl=args.fade_max_pnl,
                     fade_max_roi=args.fade_max_roi,
+                    max_sharks=args.max_sharks,
                 )
                 ranked_at = time.time()
                 _log(cs.out_path, {"event": "leaderboard", "sharks": len(cs.sharks),

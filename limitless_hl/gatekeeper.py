@@ -128,11 +128,38 @@ def _log(path: Path, payload: dict[str, Any]) -> None:
         fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def conviction_stats(
+    con: sqlite3.Connection, strategy: str, since_ms: int, min_stake: float = 50.0
+) -> dict[str, float]:
+    """Stats for the conviction subset (shark stake >= min_stake) — the trades
+    the live executor would actually take."""
+    rows = _q(con,
+        "SELECT t.raw_json, r.won, r.pnl_usdc "
+        "FROM trades t JOIN resolutions r ON t.trade_key=r.trade_key "
+        "WHERE t.strategy=? AND t.ts_ms > ?", (strategy, since_ms))
+    n = w = 0
+    pnl = 0.0
+    for r in rows:
+        try:
+            cand = (json.loads(r["raw_json"]).get("candidate")) or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        stake = cand.get("shark_stake_usdc")
+        if stake is None or float(stake) < min_stake:
+            continue
+        n += 1
+        w += r["won"]
+        pnl += r["pnl_usdc"]
+    return {"n": n, "wr": (w / n if n else 0.0), "pnl": pnl,
+            "per_trade": (pnl / n if n else 0.0)}
+
+
 def evaluate_gates(con: sqlite3.Connection, *, min_n: int, since_ms: int) -> dict[str, dict]:
-    """Returns {lane: {passed, stats}} for copy, fade, model."""
+    """Returns {lane: {passed, stats}} for copy, fade, model. Copy/fade gates
+    judge the conviction subset because that is what live execution takes."""
     out: dict[str, dict] = {}
     for lane, strat in (("copy", "copy_shadow"), ("fade", "fade_shadow")):
-        st = lane_stats(con, strat, since_ms)
+        st = conviction_stats(con, strat, since_ms)
         out[lane] = {
             "stats": st,
             "passed": st["n"] >= min_n and st["pnl"] > 0 and st["per_trade"] >= 0.05,

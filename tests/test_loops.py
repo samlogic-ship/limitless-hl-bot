@@ -35,14 +35,18 @@ def _slice_raw(score=2.5, edge=0.05):
     return json.dumps({"candidate": {"score": score, "edge": edge}})
 
 
+def _conviction_raw(stake=80.0):
+    return json.dumps({"candidate": {"shark_stake_usdc": stake}})
+
+
 def test_copy_gate_opens_on_positive_ev(tmp_path):
     db = tmp_path / "l.sqlite3"
     rows = []
-    # 120 copy trades, 40% WR but winners pay 2.0 -> +0.2/trade
+    # 120 conviction copies (shark stake >= $50), 40% WR, winners pay 2.0
     for i in range(120):
         won = 1 if i % 5 < 2 else 0
-        rows.append(("copy_shadow", "15m", 0.4, "{}", won, 2.0 if won else -1.0,
-                     1781085600001 + i))
+        rows.append(("copy_shadow", "15m", 0.4, _conviction_raw(), won,
+                     2.0 if won else -1.0, 1781085600001 + i))
     _learner_db(db, rows)
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
@@ -58,8 +62,8 @@ def test_copy_gate_stays_closed_when_unprofitable(tmp_path):
     # 120 trades, 60% WR but wins pay 0.3 vs -1 losses -> negative EV
     for i in range(120):
         won = 1 if i % 5 < 3 else 0
-        rows.append(("copy_shadow", "15m", 0.75, "{}", won, 0.3 if won else -1.0,
-                     1781085600001 + i))
+        rows.append(("copy_shadow", "15m", 0.75, _conviction_raw(), won,
+                     0.3 if won else -1.0, 1781085600001 + i))
     _learner_db(db, rows)
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
@@ -115,3 +119,19 @@ def test_refit_inactive_on_small_sample(tmp_path):
     assert model["n"] == 60
     assert model["active"] is False  # never active below min_n
     assert "auc_test" in model
+
+
+def test_copy_gate_ignores_small_stake_copies(tmp_path):
+    db = tmp_path / "l.sqlite3"
+    rows = []
+    # profitable but ALL small-stake (noise) copies: gate must not open
+    for i in range(120):
+        won = 1 if i % 5 < 2 else 0
+        rows.append(("copy_shadow", "15m", 0.4, _conviction_raw(stake=5.0), won,
+                     2.0 if won else -1.0, 1781085600001 + i))
+    _learner_db(db, rows)
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    gates = evaluate_gates(con, min_n=100, since_ms=1781085600000)
+    assert gates["copy"]["stats"]["n"] == 0
+    assert gates["copy"]["passed"] is False

@@ -79,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     # flag is the automatic switch; this arg is the standing authorization.
     p.add_argument("--live-allowed", action="store_true")
     p.add_argument("--live-stake-usdc", type=float, default=1.0)
+    p.add_argument("--live-min-shark-stake", type=float, default=50.0,
+                   help="Live-copy only conviction bets: shark stake >= this. "
+                        "Net-of-fee data 2026-06-10: >=$50 copies +0.21/trade, "
+                        "<$50 copies negative.")
     p.add_argument("--live-max-per-day", type=int, default=30)
     p.add_argument("--live-daily-loss-stop", type=float, default=3.0)
     p.add_argument("--learner-db", default="tmp/limitless_hl/learner.sqlite3")
@@ -501,11 +505,12 @@ class CopyShadow:
             "hedge_result": None,
             "ts_ms": now_ms,
         })
-        self.executor.maybe_execute(strategy, {
-            "slug": hit["market_slug"], "symbol": hit["symbol"],
-            "interval": hit["interval"], "side": our_side, "limit_price": ask,
-            "stake_usdc": a.stake_usdc, "seconds_to_expiry": int(secs_left),
-        }, now_ms)
+        if float(hit.get("stake") or 0.0) >= a.live_min_shark_stake:
+            self.executor.maybe_execute(strategy, {
+                "slug": hit["market_slug"], "symbol": hit["symbol"],
+                "interval": hit["interval"], "side": our_side, "limit_price": ask,
+                "stake_usdc": a.stake_usdc, "seconds_to_expiry": int(secs_left),
+            }, now_ms)
 
 
 def main() -> None:

@@ -96,3 +96,11 @@ def test_copy_record_is_learner_compatible():
     assert trade is not None
     assert trade.strategy == "copy_shadow"
     assert trade.price == 0.41
+
+
+def test_copy_shadow_file_routes_to_daemon_parser():
+    from pathlib import Path
+
+    from limitless_hl.learner import _source_name
+
+    assert _source_name(Path("tmp/limitless_hl/copy_shadow.jsonl")) == "daemon"

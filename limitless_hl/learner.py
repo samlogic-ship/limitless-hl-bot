@@ -459,7 +459,7 @@ def _daemon_trade(payload: dict[str, Any], *, source: str, source_path: str, lin
     slug = str(candidate.get("slug") or payload.get("slug") or "")
     side = str(candidate.get("side") or "").upper()
     price = _to_float(candidate.get("limit_price") or candidate.get("price"))
-    strategy = "shadow_daemon" if payload.get("mode") == "dry_run" else "scored_daemon"
+    strategy = str(payload.get("strategy") or ("shadow_daemon" if payload.get("mode") == "dry_run" else "scored_daemon"))
     return _make_trade(
         payload,
         source=source,

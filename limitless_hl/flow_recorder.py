@@ -308,6 +308,22 @@ class FlowRecorder:
         }
 
 
+def _prune_flow_db(db, retention_days: int = 45) -> int:
+    """Drop trades + resolved markets older than the retention window, then
+    VACUUM. The leaderboard only needs resolved markets (they settle within
+    hours), so a generous window keeps scoring intact while bounding the file.
+    VACUUM is safe here: this DB is single-digit MB and has no live dependency.
+    """
+    import time as _t
+    cutoff_ms = int((_t.time() - retention_days * 86400) * 1000)
+    cur = db.execute("DELETE FROM trades WHERE created_at_ms < ?", (cutoff_ms,))
+    deleted = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    db.execute("DELETE FROM markets WHERE resolved=1 AND expiration_ms < ?", (cutoff_ms,))
+    db.commit()
+    db.execute("VACUUM")
+    return deleted
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Limitless trade-flow recorder + wallet scorer")
     p.add_argument("--db", default="tmp/limitless_hl/flow.sqlite3")
@@ -317,6 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--loop-seconds", type=int, default=60)
     p.add_argument("--score-every-loops", type=int, default=15)
     p.add_argument("--min-markets", type=int, default=8)
+    p.add_argument("--retention-days", type=int, default=45)
     p.add_argument("--iterations", type=int, default=0)
     p.add_argument("--score-once", action="store_true", help="score the existing DB and exit")
     return p
@@ -358,6 +375,10 @@ def main(argv: list[str] | None = None) -> None:
             recorder._log({"event": "loop", "iteration": iteration, "markets_added": added,
                            "trades_inserted": inserted, "markets_resolved": resolved})
             if iteration % max(args.score_every_loops, 1) == 0:
+                pruned = _prune_flow_db(recorder.db, args.retention_days)
+                if pruned:
+                    recorder._log({"event": "pruned", "rows": pruned,
+                                   "retention_days": args.retention_days})
                 board = recorder.score(min_markets=args.min_markets)
                 scores_path.parent.mkdir(parents=True, exist_ok=True)
                 scores_path.write_text(json.dumps(board, indent=1))

@@ -29,6 +29,7 @@ from typing import Any
 import requests
 
 from .clients import LimitlessClient
+from .hl_info import post_info
 from .live_trade import (
     LimitlessCredentials,
     LimitlessOrderBuilder,
@@ -304,11 +305,8 @@ class MakerEngine:
     # -- data ----------------------------------------------------------------
 
     def _hl_mids(self) -> dict[str, float]:
-        resp = self._mids_session.post(
-            "https://api.hyperliquid.xyz/info", json={"type": "allMids"}, timeout=10
-        )
-        resp.raise_for_status()
-        return {k: float(v) for k, v in resp.json().items() if not k.startswith("@")}
+        data = post_info({"type": "allMids"}, timeout=10)
+        return {k: float(v) for k, v in data.items() if not k.startswith("@")}
 
     def _market_details(self, slug: str) -> dict[str, Any]:
         if slug not in self._details_cache:

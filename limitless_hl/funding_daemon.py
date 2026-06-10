@@ -80,6 +80,14 @@ def first_spike_decision(
         return False, "sustained_signal"
     return True, "first_spike"
 
+# HL's resting default hourly funding rate. When the premium is ~0 the exchange
+# reports exactly this value, and it sits there most of the day (93% of BTC
+# reads on 2026-06-09). A rate AT the baseline carries zero information; the
+# 2026-06-09 live run proved it: 22 trades fired at exactly 1.25e-05, 27% WR,
+# -$34.91. A signal must DEVIATE from the baseline before it counts as a spike.
+HL_BASELINE_FUNDING = 1.25e-05
+BASELINE_EPSILON = 1e-9
+
 # Minimum edge after fee: entry_price <= backtest_wr * (1 - fee) - safety_margin
 # 300bps fee = 0.03; safety_margin = 0.02 extra cushion
 SIGNALS: list[FundingSignal] = [
@@ -459,9 +467,13 @@ def main() -> None:
                 (sig.compare == "gte" and rate >= sig.threshold) or
                 (sig.compare == "lte" and rate <= sig.threshold)
             )
+            at_baseline = abs(abs(rate) - HL_BASELINE_FUNDING) < BASELINE_EPSILON
+            if triggered and at_baseline:
+                # Rate is pinned at the exchange default — not a spike, no signal.
+                triggered = False
             _log(out_path, {
                 "event": "signal_check", "coin": sig.coin, "direction": sig.direction,
-                "rate": rate, "threshold": sig.threshold,
+                "rate": rate, "threshold": sig.threshold, "at_baseline": at_baseline,
                 "triggered": triggered, "ts_ms": now_ms,
             })
 

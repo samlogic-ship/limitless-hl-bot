@@ -33,10 +33,34 @@ from .secrets import get_secret
 # Constants
 # ------------------------------------------------------------------
 LIMITLESS_API  = "https://api.limitless.exchange"
-BASE_RPC       = "https://mainnet.base.org"
+BASE_RPCS      = [
+    "https://mainnet.base.org",
+    "https://base-rpc.publicnode.com",
+    "https://base.llamarpc.com",
+]
 CTF_ADDRESS    = "0xC9c98965297Bc527861c898329Ee280632B76e18"
 USDC_ADDRESS   = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 ZERO_BYTES32   = b"\x00" * 32
+
+
+def _connect_w3():
+    """Connect to the first responsive Base RPC, rotating start point so
+    concurrent processes spread load instead of all hammering mainnet.base.org
+    (which 429'd balanceOf 36x on 2026-06-09)."""
+    import random
+    from web3 import Web3
+
+    last_exc: Exception | None = None
+    urls = BASE_RPCS[:]
+    random.shuffle(urls)
+    for url in urls:
+        try:
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": 15}))
+            if w3.is_connected():
+                return w3
+        except Exception as exc:
+            last_exc = exc
+    raise RuntimeError(f"Cannot connect to any Base RPC: {last_exc}")
 
 # Gnosis CTF indexSets for binary markets:
 #   YES/UP  = outcome 0 → bit 0 → indexSet 1
@@ -316,9 +340,7 @@ def main() -> None:
             from web3 import Web3
             from eth_account import Account
 
-            w3 = Web3(Web3.HTTPProvider(BASE_RPC))
-            if not w3.is_connected():
-                raise RuntimeError(f"Cannot connect to Base RPC: {BASE_RPC}")
+            w3 = _connect_w3()
 
             ctf = w3.eth.contract(
                 address=Web3.to_checksum_address(CTF_ADDRESS),
@@ -339,7 +361,7 @@ def main() -> None:
         # Dry-run: still need address for balance checks
         try:
             from web3 import Web3
-            w3 = Web3(Web3.HTTPProvider(BASE_RPC))
+            w3 = _connect_w3()
             ctf = w3.eth.contract(
                 address=Web3.to_checksum_address(CTF_ADDRESS),
                 abi=CTF_ABI,

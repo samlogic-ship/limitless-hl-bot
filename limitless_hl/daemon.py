@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import signal
+import sqlite3
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -71,11 +72,23 @@ def build_parser() -> argparse.ArgumentParser:
     # Edge gates
     p.add_argument("--min-edge", type=float, default=0.08)
     p.add_argument("--max-price", type=float, default=0.85)
+    p.add_argument("--min-price", type=float, default=0.0,
+                   help="Reject candidates priced below this; sub-0.20 longshots lose to the 3% taker fee")
+    p.add_argument("--max-edge", type=float, default=1.0,
+                   help="Reject candidates whose claimed edge exceeds this; very large model-vs-market gaps are adverse selection, not alpha")
     p.add_argument("--min-seconds-to-expiry", type=int, default=180)
     p.add_argument("--stake-usdc", type=float, default=25.0)
     # Risk gates
     p.add_argument("--max-daily-loss-usdc", type=float, default=50.0)
     p.add_argument("--max-open-markets", type=int, default=10)
+    p.add_argument("--max-trades-per-hour", type=int, default=0,
+                   help="Cap live entries per rolling hour (0 = unlimited)")
+    p.add_argument("--loss-cooldown-losses", type=int, default=0,
+                   help="Pause entries after this many consecutive resolved losses (0 = off)")
+    p.add_argument("--loss-cooldown-seconds", type=int, default=1800,
+                   help="How long to pause after the loss streak threshold is hit")
+    p.add_argument("--learner-db", default="tmp/limitless_hl/learner.sqlite3",
+                   help="Learner DB consulted for the loss-cooldown gate")
     # Execution mode
     p.add_argument("--live-armed", action="store_true", help="Enable real Limitless order submission")
     p.add_argument("--hedge-live", action="store_true", help="Enable real Hyperliquid hedge; requires --live-armed")
@@ -281,6 +294,8 @@ def main() -> None:
     # Session-scoped mutable state
     open_slugs, slug_expiry_ms = _load_recent_open_slugs(out_path, now_ms=int(time.time() * 1000))
     realized_pnl: float = 0.0
+    trade_times_ms: list[int] = []
+    fill_stats = {"filled": 0, "unfilled": 0}
 
     running = True
 
@@ -362,6 +377,24 @@ def main() -> None:
                 scream_min_edge=args.scream_min_edge,
                 scream_intervals=_parse_filter(args.scream_intervals),
             )
+            gated: list[dict[str, Any]] = []
+            for cand in candidates:
+                price = float(cand.get("limit_price") or 0.0)
+                edge = float(cand.get("edge") or 0.0)
+                if args.min_price > 0 and price < args.min_price:
+                    _log(out_path, {
+                        "event": "price_blocked", "slug": cand.get("slug"), "side": cand.get("side"),
+                        "price": price, "min_price": args.min_price, "ts_ms": now_ms,
+                    })
+                    continue
+                if edge > args.max_edge:
+                    _log(out_path, {
+                        "event": "edge_blocked", "slug": cand.get("slug"), "side": cand.get("side"),
+                        "edge": edge, "max_edge": args.max_edge, "ts_ms": now_ms,
+                    })
+                    continue
+                gated.append(cand)
+            candidates = gated
             if feature_provider is not None:
                 candidates, score_rejections = _score_candidates(
                     candidates,
@@ -400,6 +433,34 @@ def main() -> None:
 
         if not candidates:
             _log(out_path, {"event": "scan_empty", "market_count": report.get("market_count", 0), "ts_ms": now_ms})
+            if args.iterations and iteration >= args.iterations:
+                break
+            time.sleep(max(args.loop_seconds, 1))
+            continue
+
+        # Entry throttle: rolling-hour trade cap
+        if args.max_trades_per_hour > 0:
+            cutoff = now_ms - 3_600_000
+            trade_times_ms[:] = [t for t in trade_times_ms if t >= cutoff]
+            if len(trade_times_ms) >= args.max_trades_per_hour:
+                _log(out_path, {
+                    "event": "throttled", "reason": "max_trades_per_hour",
+                    "count": len(trade_times_ms), "ts_ms": now_ms,
+                })
+                if args.iterations and iteration >= args.iterations:
+                    break
+                time.sleep(max(args.loop_seconds, 1))
+                continue
+
+        # Loss cooldown: pause after a streak of resolved losses
+        if args.loss_cooldown_losses > 0 and _in_loss_cooldown(
+            Path(args.learner_db),
+            source_path=str(args.jsonl_out),
+            losses=args.loss_cooldown_losses,
+            cooldown_ms=args.loss_cooldown_seconds * 1000,
+            now_ms=now_ms,
+        ):
+            _log(out_path, {"event": "throttled", "reason": "loss_cooldown", "ts_ms": now_ms})
             if args.iterations and iteration >= args.iterations:
                 break
             time.sleep(max(args.loop_seconds, 1))
@@ -474,6 +535,19 @@ def main() -> None:
             _log(out_path, entry)
             print(json.dumps(entry, sort_keys=True), flush=True)
 
+            trade_times_ms.append(now_ms)
+            if entry.get("state") == "limitless_unfilled":
+                fill_stats["unfilled"] += 1
+            else:
+                fill_stats["filled"] += 1
+            attempts = fill_stats["filled"] + fill_stats["unfilled"]
+            if attempts % 10 == 0:
+                _log(out_path, {
+                    "event": "fill_stats", **fill_stats,
+                    "fill_rate": round(fill_stats["filled"] / attempts, 3),
+                    "ts_ms": now_ms,
+                })
+
             # Mark this slug as open for the session (prevents duplicate entries)
             expiry_ms = now_ms + int(candidate.get("seconds_to_expiry", 3600)) * 1000
             open_slugs.add(candidate["slug"])
@@ -501,6 +575,37 @@ def main() -> None:
 def _log(path: Path, payload: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _in_loss_cooldown(
+    db_path: Path,
+    *,
+    source_path: str,
+    losses: int,
+    cooldown_ms: int,
+    now_ms: int,
+) -> bool:
+    """True when the last `losses` resolved trades for this jsonl source are all
+    losses and the most recent one resolved inside the cooldown window."""
+    if losses <= 0 or not db_path.exists():
+        return False
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            rows = con.execute(
+                "SELECT r.won, r.resolved_at_ms FROM resolutions r "
+                "JOIN trades t ON t.trade_key = r.trade_key "
+                "WHERE t.source_path = ? ORDER BY r.resolved_at_ms DESC LIMIT ?",
+                (source_path, losses),
+            ).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return False
+    if len(rows) < losses or any(row[0] for row in rows):
+        return False
+    last_loss_ms = max(int(row[1]) for row in rows)
+    return now_ms - last_loss_ms < cooldown_ms
 
 
 def _is_rate_limited_error(exc: Exception) -> bool:

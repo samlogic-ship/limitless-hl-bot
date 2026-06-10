@@ -16,6 +16,8 @@ from typing import Literal, Optional, cast
 
 import requests
 
+from .hl_info import post_info
+
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 _SESSION = requests.Session()
 _SESSION.headers.update({"Content-Type": "application/json"})
@@ -55,14 +57,13 @@ def fetch_candles(coin: str, n: int = 6, interval: str = "15m") -> list[Candle]:
     interval_ms = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000}.get(interval, 900_000)
     start_ms = now_ms - (n + 3) * interval_ms
 
-    resp = _SESSION.post(HL_INFO_URL, json={
+    data = post_info({
         "type": "candleSnapshot",
         "req": {"coin": coin, "interval": interval, "startTime": start_ms, "endTime": now_ms},
     }, timeout=10)
-    resp.raise_for_status()
 
     candles = []
-    for c in resp.json():
+    for c in data:
         candles.append(Candle(
             open_ms=int(c["t"]), close_ms=int(c["T"]),
             open=float(c["o"]), close=float(c["c"]),
@@ -84,9 +85,7 @@ def fetch_funding(coin: str) -> Optional[float]:
     Returns None on error.
     """
     try:
-        resp = _SESSION.post(HL_INFO_URL, json={"type": "metaAndAssetCtxs"}, timeout=10)
-        resp.raise_for_status()
-        meta_list, ctx_list = resp.json()
+        meta_list, ctx_list = post_info({"type": "metaAndAssetCtxs"}, timeout=10)
         universe = meta_list.get("universe", [])
         for i, asset in enumerate(universe):
             if asset.get("name") == coin:

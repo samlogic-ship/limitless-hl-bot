@@ -8,6 +8,8 @@ import time
 
 import requests
 
+from .hl_info import post_info
+
 
 @dataclass(frozen=True, slots=True)
 class SliceStats:
@@ -236,9 +238,10 @@ def _scream_regime_aligned(side: str, features: MarketFeatures) -> tuple[bool, s
 
 
 def _fetch_hl_post(session: requests.Session, payload: dict[str, Any], timeout: int) -> Any:
-    response = session.post("https://api.hyperliquid.xyz/info", json=payload, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+    # Routed through the shared cross-process /info cache; `session` stays in
+    # the signature so call sites are unchanged.
+    del session
+    return post_info(payload, timeout=timeout)
 
 
 def _momentum_bps(candles: list[dict[str, Any]], lookback: int) -> float:

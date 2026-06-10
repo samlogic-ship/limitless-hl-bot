@@ -35,9 +35,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import os
 import requests
 
 from .clients import LimitlessClient
+from .live_trade import (
+    LimitlessCredentials,
+    LimitlessOrderBuilder,
+    LimitlessSubmitter,
+    candidate_to_limitless_intent,
+)
+from .secrets import get_secret
 
 BASE_URL = "https://api.limitless.exchange"
 FAST_INTERVALS = {"5m", "15m", "1h"}
@@ -63,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-price", type=float, default=0.92)
     p.add_argument("--stake-usdc", type=float, default=1.0)
     p.add_argument("--iterations", type=int, default=0)
+    # Live execution: only fires when BOTH --live-allowed is set AND the
+    # gatekeeper has written the per-strategy arm flag (gate passed). The
+    # flag is the automatic switch; this arg is the standing authorization.
+    p.add_argument("--live-allowed", action="store_true")
+    p.add_argument("--live-stake-usdc", type=float, default=1.0)
+    p.add_argument("--live-max-per-day", type=int, default=30)
+    p.add_argument("--live-daily-loss-stop", type=float, default=3.0)
+    p.add_argument("--learner-db", default="tmp/limitless_hl/learner.sqlite3")
+    p.add_argument("--live-jsonl-out", default="tmp/limitless_hl/copy_live.jsonl")
+    p.add_argument("--arm-flag-dir", default="tmp/limitless_hl")
     return p
 
 
@@ -161,6 +179,140 @@ def _log(path: Path, payload: dict[str, Any]) -> None:
         fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def _live_strategy(strategy: str) -> str:
+    return strategy.replace("_shadow", "_live")
+
+
+class LiveExecutor:
+    """Submits real Limitless FAK buys for gate-passed lanes. Hard caps:
+    stake clamped to <= $2, per-day trade cap, daily-loss stop from the
+    learner DB. Lazily builds the submitter; any setup failure disables it."""
+
+    def __init__(self, args: argparse.Namespace, out_path: Path):
+        self.args = args
+        self.out_path = Path(args.live_jsonl_out)
+        self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        self.client = LimitlessClient()
+        self.submitter: LimitlessSubmitter | None = None
+        self.disabled_reason: str | None = None
+        self.sent_today = self._count_sent_today()
+
+    def _count_sent_today(self) -> int:
+        if not self.out_path.exists():
+            return 0
+        day_start = int(time.time() // 86400 * 86400 * 1000)
+        n = 0
+        try:
+            for line in self.out_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if r.get("event") == "live_trade" and r.get("ts_ms", 0) >= day_start:
+                    n += 1
+        except OSError:
+            pass
+        return n
+
+    def _ensure_submitter(self) -> bool:
+        if self.submitter is not None:
+            return True
+        if self.disabled_reason:
+            return False
+        try:
+            token_id = get_secret("LIMITLESS_TOKEN_ID")
+            token_secret = get_secret("LIMITLESS_TOKEN_SECRET")
+            private_key = get_secret("LIMITLESS_PRIVATE_KEY")
+            owner_id = os.environ.get("LIMITLESS_OWNER_ID")
+            maker_address = os.environ.get("LIMITLESS_MAKER_ADDRESS")
+            if not all([token_id, token_secret, private_key, owner_id, maker_address]):
+                raise RuntimeError("missing credentials")
+            smart_wallet = os.environ.get("LIMITLESS_SMART_WALLET") or maker_address or ""
+            sig_type = int(os.environ.get("LIMITLESS_SIGNATURE_TYPE", "0"))
+            self.submitter = LimitlessSubmitter(
+                credentials=LimitlessCredentials(token_id or "", token_secret or ""),
+                builder=LimitlessOrderBuilder(
+                    maker=smart_wallet,
+                    owner_id=int(owner_id or "0"),
+                    fee_rate_bps=int(os.environ.get("LIMITLESS_FEE_RATE_BPS", "300")),
+                    signature_type=sig_type,
+                    signer=(maker_address if sig_type == 1 else None),
+                ),
+                private_key=private_key or "",
+            )
+            return True
+        except Exception as exc:
+            self.disabled_reason = str(exc)
+            _log(self.out_path, {"event": "live_disabled", "error": str(exc),
+                                 "ts_ms": int(time.time() * 1000)})
+            return False
+
+    def _daily_loss_hit(self, strategies: tuple[str, ...]) -> bool:
+        db = Path(self.args.learner_db)
+        if not db.exists():
+            return False
+        day_start = int(time.time() // 86400 * 86400 * 1000)
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+            try:
+                row = con.execute(
+                    "SELECT COALESCE(SUM(r.pnl_usdc), 0) FROM trades t "
+                    "JOIN resolutions r ON t.trade_key = r.trade_key "
+                    f"WHERE t.strategy IN ({','.join('?' * len(strategies))}) "
+                    "AND r.resolved_at_ms >= ?",
+                    (*strategies, day_start),
+                ).fetchone()
+            finally:
+                con.close()
+        except Exception:
+            return False
+        return float(row[0] or 0.0) <= -abs(self.args.live_daily_loss_stop)
+
+    def maybe_execute(self, strategy: str, candidate: dict[str, Any], now_ms: int) -> None:
+        a = self.args
+        flag = Path(a.arm_flag_dir) / f"gate_{_live_strategy(strategy)}.flag"
+        if not a.live_allowed or not flag.exists():
+            return
+        if self.sent_today >= a.live_max_per_day:
+            _log(self.out_path, {"event": "live_skip", "reason": "max_per_day",
+                                 "ts_ms": now_ms})
+            return
+        live_strats = ("copy_live", "fade_live")
+        if self._daily_loss_hit(live_strats):
+            _log(self.out_path, {"event": "live_skip", "reason": "daily_loss_stop",
+                                 "ts_ms": now_ms})
+            return
+        if not self._ensure_submitter():
+            return
+        stake = min(a.live_stake_usdc, 2.0)
+        live_cand = dict(candidate)
+        live_cand["stake_usdc"] = stake
+        try:
+            details = self.client.market_details(candidate["slug"])
+            client_order_id = (
+                f"limitless-copy-{candidate['slug']}-{candidate['side']}-{now_ms}"
+            )
+            intent = candidate_to_limitless_intent(
+                live_cand, details, client_order_id=client_order_id
+            )
+            assert self.submitter is not None
+            result = self.submitter.submit_intent(intent)
+            self.sent_today += 1
+            _log(self.out_path, {
+                "event": "live_trade",
+                "mode": "live",
+                "state": "limitless_filled_unhedged",
+                "strategy": _live_strategy(strategy),
+                "candidate": live_cand,
+                "limitless_result": result,
+                "hedge_result": None,
+                "ts_ms": now_ms,
+            })
+        except Exception as exc:
+            _log(self.out_path, {"event": "live_error", "slug": candidate.get("slug"),
+                                 "error": str(exc)[:300], "ts_ms": now_ms})
+
+
 class CopyShadow:
     def __init__(self, args: argparse.Namespace):
         self.args = args
@@ -170,6 +322,7 @@ class CopyShadow:
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
         self.copied = _load_copied(self.out_path)
+        self.executor = LiveExecutor(args, self.out_path)
         self.sharks: set[str] = set()
         self.fish: set[str] = set()
         self.fast_markets: list[dict[str, Any]] = []
@@ -337,6 +490,11 @@ class CopyShadow:
             "hedge_result": None,
             "ts_ms": now_ms,
         })
+        self.executor.maybe_execute(strategy, {
+            "slug": hit["market_slug"], "symbol": hit["symbol"],
+            "interval": hit["interval"], "side": our_side, "limit_price": ask,
+            "stake_usdc": a.stake_usdc, "seconds_to_expiry": int(secs_left),
+        }, now_ms)
 
 
 def main() -> None:

@@ -125,7 +125,7 @@ def test_run_once_resolves_trades_and_writes_daemon_compatible_report(tmp_path: 
 
     assert ("15m", "BTC", "UP") in scores
     assert ("15m", "BNB", "DOWN") in scores
-    assert stats[("15m", "BTC", "UP")].roi == 1.5
+    assert stats[("15m", "BTC", "UP")].roi == 1.425  # net of 3% taker fee
 
 
 def test_seed_report_keeps_historical_slice_available(tmp_path: Path) -> None:

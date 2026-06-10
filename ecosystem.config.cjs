@@ -102,7 +102,7 @@ module.exports = {
       script: "bash",
       args: [
         "--noprofile", "--norc", "-c",
-        `"${PYTHON}" -m limitless_hl.copy_shadow --loop-seconds 30 --rank-seconds 900 --min-markets 10 --min-roi 0.05 --min-pnl 20 --max-avg-price 0.85 --min-seconds-to-expiry 120 --max-chase 0.06 --jsonl-out tmp/limitless_hl/copy_shadow.jsonl`,
+        `"${PYTHON}" -m limitless_hl.copy_shadow --loop-seconds 8 --rank-seconds 900 --min-markets 10 --min-roi 0.05 --min-pnl 20 --max-avg-price 0.85 --min-seconds-to-expiry 120 --max-chase 0.06 --jsonl-out tmp/limitless_hl/copy_shadow.jsonl`,
       ],
       autorestart: true,
       restart_delay: 10000,

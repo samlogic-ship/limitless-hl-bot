@@ -8,6 +8,13 @@ position, records a dry-run copy at OUR currently fillable ask price (not
 their fill). The learner ingests the jsonl and scores the lane as
 strategy=copy_shadow. No orders are ever sent; mode is always dry_run.
 
+Detection has two paths:
+- FAST: 5m/15m/1h markets get their /events feed polled directly every loop
+  (~8s detection latency; there is no public websocket, but the endpoint
+  answers in ~30ms and tolerates this rate).
+- SLOW: everything else (dailies/weeklies, where minutes of latency are
+  irrelevant) comes from flow.sqlite3, which the recorder refreshes every 60s.
+
 Leaderboard criteria (refreshed every --rank-seconds from flow.sqlite3):
   >= --min-markets resolved markets, ROI >= --min-roi, PnL >= --min-pnl,
   average entry price <= --max-avg-price (excludes last-second snipers whose
@@ -24,18 +31,25 @@ import signal
 import sqlite3
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from .clients import LimitlessClient
+
+BASE_URL = "https://api.limitless.exchange"
+FAST_INTERVALS = {"5m", "15m", "1h"}
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Shadow-copy profitable Limitless wallets")
     p.add_argument("--flow-db", default="tmp/limitless_hl/flow.sqlite3")
     p.add_argument("--jsonl-out", default="tmp/limitless_hl/copy_shadow.jsonl")
-    p.add_argument("--loop-seconds", type=int, default=30)
+    p.add_argument("--loop-seconds", type=int, default=8)
     p.add_argument("--rank-seconds", type=int, default=900)
+    p.add_argument("--markets-refresh-seconds", type=int, default=60)
     p.add_argument("--min-markets", type=int, default=10)
     p.add_argument("--min-roi", type=float, default=0.05)
     p.add_argument("--min-pnl", type=float, default=20.0)
@@ -108,6 +122,15 @@ def rank_wallets(
     return sharks
 
 
+def _parse_iso_ms(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        return 0
+
+
 def _load_copied(path: Path) -> set[tuple[str, str]]:
     copied: set[tuple[str, str]] = set()
     if not path.exists():
@@ -133,16 +156,178 @@ def _log(path: Path, payload: dict[str, Any]) -> None:
         fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+class CopyShadow:
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.out_path = Path(args.jsonl_out)
+        self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        self.client = LimitlessClient()
+        self.session = requests.Session()
+        self.session.headers.update({"Accept": "application/json"})
+        self.copied = _load_copied(self.out_path)
+        self.sharks: set[str] = set()
+        self.fast_markets: list[dict[str, Any]] = []
+        self.watermark: dict[str, int] = {}
+        self.slow_seen_ms = int(time.time() * 1000)
+
+    def refresh_markets(self, now_ms: int) -> None:
+        con = sqlite3.connect(f"file:{self.args.flow_db}?mode=ro", uri=True, timeout=5)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = con.execute(
+                "SELECT slug, symbol, interval, expiration_ms, token_up, token_down "
+                "FROM markets WHERE resolved=0 AND expiration_ms > ?",
+                (now_ms + self.args.min_seconds_to_expiry * 1000,),
+            ).fetchall()
+        finally:
+            con.close()
+        self.fast_markets = [dict(r) for r in rows if r["interval"] in FAST_INTERVALS]
+        for m in self.fast_markets:
+            self.watermark.setdefault(m["slug"], now_ms)
+
+    def poll_fast(self, now_ms: int) -> list[dict[str, Any]]:
+        """Poll /events directly for short markets; return fresh shark buys."""
+        hits: list[dict[str, Any]] = []
+        for m in self.fast_markets:
+            if m["expiration_ms"] - now_ms < self.args.min_seconds_to_expiry * 1000:
+                continue
+            try:
+                resp = self.session.get(
+                    f"{BASE_URL}/markets/{m['slug']}/events",
+                    params={"page": 1, "limit": 25},
+                    timeout=6,
+                )
+                if resp.status_code != 200:
+                    continue
+                events = resp.json().get("events") or []
+            except Exception:
+                continue
+            wm = self.watermark.get(m["slug"], now_ms)
+            newest = wm
+            for row in events:
+                created_ms = _parse_iso_ms(row.get("createdAt"))
+                newest = max(newest, created_ms)
+                if created_ms <= wm:
+                    continue
+                if int(row.get("side") or 0) != 0:  # buys only
+                    continue
+                acct = str((row.get("profile") or {}).get("account") or "").lower()
+                if acct not in self.sharks:
+                    continue
+                token_id = str(row.get("tokenId") or "")
+                outcome = (
+                    "UP" if token_id == m["token_up"]
+                    else "DOWN" if token_id == m["token_down"]
+                    else None
+                )
+                if not outcome:
+                    continue
+                try:
+                    price = float(row.get("price") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                hits.append({
+                    "account": acct, "market_slug": m["slug"], "outcome": outcome,
+                    "price": price, "created_at_ms": created_ms, "symbol": m["symbol"],
+                    "interval": m["interval"], "expiration_ms": m["expiration_ms"],
+                    "via": "fast",
+                })
+            self.watermark[m["slug"]] = newest
+            time.sleep(0.05)
+        return hits
+
+    def poll_slow(self, now_ms: int) -> list[dict[str, Any]]:
+        """flow.sqlite3 backstop for long intervals (recorder refreshes ~60s)."""
+        try:
+            con = sqlite3.connect(f"file:{self.args.flow_db}?mode=ro", uri=True, timeout=5)
+            con.row_factory = sqlite3.Row
+            try:
+                rows = con.execute(
+                    "SELECT t.account, t.market_slug, t.outcome, t.price, t.created_at_ms,"
+                    "       m.symbol, m.interval, m.expiration_ms "
+                    "FROM trades t JOIN markets m ON m.slug = t.market_slug "
+                    "WHERE t.created_at_ms > ? AND t.side = 0 "
+                    "AND t.outcome IN ('UP','DOWN') AND t.account != ''",
+                    (self.slow_seen_ms,),
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception as exc:
+            _log(self.out_path, {"event": "poll_error", "error": str(exc), "ts_ms": now_ms})
+            return []
+        hits = []
+        for t in rows:
+            self.slow_seen_ms = max(self.slow_seen_ms, t["created_at_ms"])
+            if t["interval"] in FAST_INTERVALS:  # fast path owns these
+                continue
+            if t["account"] in self.sharks:
+                hits.append({**dict(t), "via": "slow"})
+        return hits
+
+    def try_copy(self, hit: dict[str, Any], now_ms: int) -> None:
+        a = self.args
+        key = (hit["market_slug"], hit["outcome"])
+        if key in self.copied:
+            return
+        secs_left = (hit["expiration_ms"] - now_ms) / 1000
+        if secs_left < a.min_seconds_to_expiry:
+            _log(self.out_path, {"event": "copy_skip", "reason": "too_late",
+                                 "slug": hit["market_slug"], "ts_ms": now_ms})
+            return
+        try:
+            book = self.client.orderbook(hit["market_slug"])
+        except Exception as exc:
+            _log(self.out_path, {"event": "copy_skip", "reason": "book_error",
+                                 "slug": hit["market_slug"], "error": str(exc), "ts_ms": now_ms})
+            return
+        ask = book.up_ask if hit["outcome"] == "UP" else book.down_ask
+        if not ask or not (a.min_price <= ask <= a.max_price):
+            _log(self.out_path, {"event": "copy_skip", "reason": "price_out_of_band",
+                                 "slug": hit["market_slug"], "ask": ask, "ts_ms": now_ms})
+            return
+        if ask > hit["price"] + a.max_chase:
+            _log(self.out_path, {"event": "copy_skip", "reason": "chased_too_far",
+                                 "slug": hit["market_slug"], "shark_px": hit["price"],
+                                 "ask": ask, "ts_ms": now_ms})
+            return
+        self.copied.add(key)
+        detect_lag_s = max(0.0, (now_ms - hit["created_at_ms"]) / 1000)
+        _log(self.out_path, {
+            "event": "trade",
+            "mode": "dry_run",
+            "state": "hedged",
+            "strategy": "copy_shadow",
+            "candidate": {
+                "slug": hit["market_slug"],
+                "symbol": hit["symbol"],
+                "interval": hit["interval"],
+                "side": hit["outcome"],
+                "limit_price": ask,
+                "stake_usdc": a.stake_usdc,
+                "seconds_to_expiry": int(secs_left),
+                "reason": (
+                    f"copy {hit['account'][:10]} {hit['outcome']} via={hit['via']} "
+                    f"lag={detect_lag_s:.1f}s shark_px={hit['price']:.3f} our_ask={ask:.3f}"
+                ),
+                "shark": hit["account"],
+                "shark_price": hit["price"],
+                "detect_lag_s": round(detect_lag_s, 1),
+                "via": hit["via"],
+            },
+            "limitless_result": {"matched": True, "filled_usdc": a.stake_usdc,
+                                 "raw": {"mode": "preview"}},
+            "hedge_result": None,
+            "ts_ms": now_ms,
+        })
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    out_path = Path(args.jsonl_out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    client = LimitlessClient()
-
-    copied = _load_copied(out_path)
-    sharks: set[str] = set()
+    cs = CopyShadow(args)
     ranked_at = 0.0
-    last_seen_ms = int(time.time() * 1000)
+    markets_at = 0.0
 
     running = True
 
@@ -153,7 +338,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
-    _log(out_path, {"event": "startup", "mode": "dry_run", "ts_ms": last_seen_ms})
+    _log(cs.out_path, {"event": "startup", "mode": "dry_run", "ts_ms": int(time.time() * 1000)})
 
     iteration = 0
     while running:
@@ -162,7 +347,7 @@ def main() -> None:
 
         if time.time() - ranked_at >= args.rank_seconds:
             try:
-                sharks = rank_wallets(
+                cs.sharks = rank_wallets(
                     args.flow_db,
                     min_markets=args.min_markets,
                     min_roi=args.min_roi,
@@ -170,91 +355,26 @@ def main() -> None:
                     max_avg_price=args.max_avg_price,
                 )
                 ranked_at = time.time()
-                _log(out_path, {"event": "leaderboard", "sharks": len(sharks), "ts_ms": now_ms})
+                _log(cs.out_path, {"event": "leaderboard", "sharks": len(cs.sharks), "ts_ms": now_ms})
             except Exception as exc:
-                _log(out_path, {"event": "rank_error", "error": str(exc), "ts_ms": now_ms})
+                _log(cs.out_path, {"event": "rank_error", "error": str(exc), "ts_ms": now_ms})
 
-        try:
-            con = sqlite3.connect(f"file:{args.flow_db}?mode=ro", uri=True, timeout=5)
-            con.row_factory = sqlite3.Row
+        if time.time() - markets_at >= args.markets_refresh_seconds:
             try:
-                fresh = con.execute(
-                    "SELECT t.account, t.market_slug, t.outcome, t.price, t.created_at_ms,"
-                    "       m.symbol, m.interval, m.expiration_ms "
-                    "FROM trades t JOIN markets m ON m.slug = t.market_slug "
-                    "WHERE t.created_at_ms > ? AND t.side = 0 "
-                    "AND t.outcome IN ('UP','DOWN') AND t.account != '' "
-                    "ORDER BY t.created_at_ms",
-                    (last_seen_ms,),
-                ).fetchall()
-            finally:
-                con.close()
-        except Exception as exc:
-            _log(out_path, {"event": "poll_error", "error": str(exc), "ts_ms": now_ms})
-            time.sleep(max(args.loop_seconds, 1))
-            continue
-
-        for t in fresh:
-            last_seen_ms = max(last_seen_ms, t["created_at_ms"])
-            if t["account"] not in sharks:
-                continue
-            key = (t["market_slug"], t["outcome"])
-            if key in copied:
-                continue
-            secs_left = (t["expiration_ms"] - now_ms) / 1000
-            if secs_left < args.min_seconds_to_expiry:
-                _log(out_path, {"event": "copy_skip", "reason": "too_late",
-                                "slug": t["market_slug"], "ts_ms": now_ms})
-                continue
-            try:
-                book = client.orderbook(t["market_slug"])
+                cs.refresh_markets(now_ms)
+                markets_at = time.time()
             except Exception as exc:
-                _log(out_path, {"event": "copy_skip", "reason": "book_error",
-                                "slug": t["market_slug"], "error": str(exc), "ts_ms": now_ms})
-                continue
-            ask = book.up_ask if t["outcome"] == "UP" else book.down_ask
-            if not ask or not (args.min_price <= ask <= args.max_price):
-                _log(out_path, {"event": "copy_skip", "reason": "price_out_of_band",
-                                "slug": t["market_slug"], "ask": ask, "ts_ms": now_ms})
-                continue
-            if ask > t["price"] + args.max_chase:
-                _log(out_path, {"event": "copy_skip", "reason": "chased_too_far",
-                                "slug": t["market_slug"], "shark_px": t["price"],
-                                "ask": ask, "ts_ms": now_ms})
-                continue
-            copied.add(key)
-            _log(out_path, {
-                "event": "trade",
-                "mode": "dry_run",
-                "state": "hedged",
-                "strategy": "copy_shadow",
-                "candidate": {
-                    "slug": t["market_slug"],
-                    "symbol": t["symbol"],
-                    "interval": t["interval"],
-                    "side": t["outcome"],
-                    "limit_price": ask,
-                    "stake_usdc": args.stake_usdc,
-                    "seconds_to_expiry": int(secs_left),
-                    "reason": (
-                        f"copy {t['account'][:10]} {t['outcome']} "
-                        f"shark_px={t['price']:.3f} our_ask={ask:.3f}"
-                    ),
-                    "shark": t["account"],
-                    "shark_price": t["price"],
-                },
-                "limitless_result": {"matched": True, "filled_usdc": args.stake_usdc,
-                                     "raw": {"mode": "preview"}},
-                "hedge_result": None,
-                "ts_ms": now_ms,
-            })
+                _log(cs.out_path, {"event": "markets_error", "error": str(exc), "ts_ms": now_ms})
+
+        for hit in cs.poll_fast(now_ms) + cs.poll_slow(now_ms):
+            cs.try_copy(hit, int(time.time() * 1000))
 
         if args.iterations and iteration >= args.iterations:
             break
         if running:
             time.sleep(max(args.loop_seconds, 1))
 
-    _log(out_path, {"event": "shutdown", "ts_ms": int(time.time() * 1000)})
+    _log(cs.out_path, {"event": "shutdown", "ts_ms": int(time.time() * 1000)})
 
 
 if __name__ == "__main__":

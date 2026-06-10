@@ -27,6 +27,10 @@ class MarketFeatures:
     momentum_3m_bps: float = 0.0
     momentum_5m_bps: float = 0.0
     open_interest_change_bps: float | None = None
+    # Taker flow imbalance on Binance over the last 60s: (buy-sell)/(buy+sell)
+    # in [-1, 1]. Recorded for every scored candidate so the offline EV model
+    # can learn whether order flow predicts these 5-15min resolutions.
+    binance_taker_imbalance_1m: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +85,7 @@ class LiveFeatureProvider:
             hl_mid=float(candidate.get("hyperliquid_mid") or 0.0),
             binance_mid=self._fetch_binance_mid(symbol),
             funding=self._fetch_funding(symbol),
+            binance_taker_imbalance_1m=self._fetch_taker_imbalance(symbol),
             **self._fetch_momentum(symbol),
         )
         self._cache[symbol] = (now, features)
@@ -332,6 +337,31 @@ def _binance_ticker_url() -> str:
     return "https://api.binance.com/api/v3/ticker/price"
 
 
+def _fetch_taker_imbalance(session: requests.Session, symbol: str, timeout: int) -> float | None:
+    """Net taker flow on Binance over the last 60s, normalized to [-1, 1]."""
+    try:
+        end = int(time.time() * 1000)
+        rows = _get_json(
+            session,
+            "https://api.binance.com/api/v3/aggTrades",
+            {"symbol": _binance_symbol(symbol), "startTime": end - 60_000,
+             "endTime": end, "limit": 1000},
+            timeout,
+        )
+        buy = sell = 0.0
+        for r in rows or []:
+            notional = float(r["p"]) * float(r["q"])
+            # m=True means the buyer was the maker, i.e. the taker SOLD
+            if r.get("m"):
+                sell += notional
+            else:
+                buy += notional
+        total = buy + sell
+        return (buy - sell) / total if total > 0 else None
+    except Exception:
+        return None
+
+
 def _fetch_binance(session: requests.Session, symbol: str, timeout: int) -> float | None:
     try:
         return _ticker_price(_get_json(session, _binance_ticker_url(), {"symbol": _binance_symbol(symbol)}, timeout))
@@ -366,9 +396,14 @@ def _provider_fetch_momentum(self: LiveFeatureProvider, symbol: str) -> dict[str
     return _fetch_momentum(self.session, symbol, self.timeout)
 
 
+def _provider_fetch_taker_imbalance(self: LiveFeatureProvider, symbol: str) -> float | None:
+    return _fetch_taker_imbalance(self.session, symbol, self.timeout)
+
+
 LiveFeatureProvider._fetch_binance_mid = _provider_fetch_binance  # type: ignore[attr-defined]
 LiveFeatureProvider._fetch_funding = _provider_fetch_funding  # type: ignore[attr-defined]
 LiveFeatureProvider._fetch_momentum = _provider_fetch_momentum  # type: ignore[attr-defined]
+LiveFeatureProvider._fetch_taker_imbalance = _provider_fetch_taker_imbalance  # type: ignore[attr-defined]
 
 
 def _stake_for_score(score: float, config: ScoringConfig) -> float:

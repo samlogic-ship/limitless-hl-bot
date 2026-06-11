@@ -314,12 +314,19 @@ def _post_json(session: requests.Session, payload: dict[str, Any], timeout: int)
     return _fetch_hl_post(session, payload, timeout)
 
 
+_CANDLE_BUCKET_MS = 15_000
+
+
 def _start_ms(minutes: int) -> int:
-    return int(time.time() * 1000) - minutes * 60_000
+    return _end_ms() - minutes * 60_000
 
 
 def _end_ms() -> int:
-    return int(time.time() * 1000)
+    # Bucketed to 15s so identical candle requests within a bucket share one
+    # cache entry; raw time.time() made every payload unique and turned the
+    # shared /info cache into a no-op for candles (audit 2026-06-11).
+    now = int(time.time() * 1000)
+    return now - (now % _CANDLE_BUCKET_MS)
 
 
 def _hl_candle_payload(symbol: str) -> dict[str, Any]:

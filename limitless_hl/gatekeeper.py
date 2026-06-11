@@ -46,6 +46,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Exploration tier: best lane trades small even before "
                         "full significance; a silent engine learns nothing")
     p.add_argument("--explore-min-per-trade", type=float, default=0.05)
+    p.add_argument("--conviction-since-floor", type=int, default=1781134560000,
+                   help="The $50 conviction threshold was chosen at this "
+                        "timestamp (2026-06-10 23:36Z); gates judge it only on "
+                        "data collected AFTER selection, never on the window "
+                        "that suggested it (multiple-comparisons guard)")
     p.add_argument("--since-ms", type=int, default=1781085600000)  # 2026-06-10 10:00Z restart
     p.add_argument("--divergence-window", type=int, default=30)
     p.add_argument("--divergence-usdc", type=float, default=0.15)
@@ -254,8 +259,18 @@ def main() -> None:
             con = sqlite3.connect(f"file:{args.learner_db}?mode=ro", uri=True, timeout=5)
             con.row_factory = sqlite3.Row
             try:
+                # Two windows: the EXPLORE tier (reduced caps) may act on the
+                # rolling window that includes the data which suggested the
+                # conviction filter — it IS the bounded forward experiment.
+                # FULL caps require the gate to pass on post-selection data
+                # only (multiple-comparisons guard from the 2026-06-11 audit).
                 window_since = max(args.since_ms, now_ms - 48 * 3600 * 1000)
+                forward_since = max(window_since, args.conviction_since_floor)
                 gates = evaluate_gates(con, min_n=args.min_n, since_ms=window_since)
+                gates_forward = evaluate_gates(con, min_n=args.min_n, since_ms=forward_since)
+                for lane in gates:
+                    gates[lane]["passed"] = gates_forward[lane]["passed"]
+                    gates[lane]["forward_stats"] = gates_forward[lane]["stats"]
 
                 # Kill switch first
                 today = live_pnl_today(con)

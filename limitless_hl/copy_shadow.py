@@ -166,12 +166,14 @@ def _parse_iso_ms(value: str | None) -> int:
         return 0
 
 
-def _load_copied(path: Path) -> set[tuple[str, str]]:
-    copied: set[tuple[str, str]] = set()
+def _load_copied(path: Path) -> set[tuple[str, str, str]]:
+    # Full scan: a tail slice forgot old entries after restart and allowed a
+    # second real order into the same market+side (audit 2026-06-11).
+    copied: set[tuple[str, str, str]] = set()
     if not path.exists():
         return copied
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-2000:]
+        lines = path.read_text(encoding="utf-8").splitlines()
     except Exception:
         return copied
     for line in lines:
@@ -364,7 +366,19 @@ class CopyShadow:
         self.fish: set[str] = set()
         self.fast_markets: list[dict[str, Any]] = []
         self.watermark: dict[str, int] = {}
+        # Seed the slow cursor from the flow DB so a restart does not drop
+        # shark signals recorded during the downtime window.
         self.slow_seen_ms = int(time.time() * 1000)
+        try:
+            con = sqlite3.connect(f"file:{args.flow_db}?mode=ro", uri=True, timeout=5)
+            try:
+                row = con.execute("SELECT MAX(created_at_ms) FROM trades").fetchone()
+            finally:
+                con.close()
+            if row and row[0]:
+                self.slow_seen_ms = min(self.slow_seen_ms, int(row[0]))
+        except Exception:
+            pass
 
     def refresh_markets(self, now_ms: int) -> None:
         con = sqlite3.connect(f"file:{self.args.flow_db}?mode=ro", uri=True, timeout=5)

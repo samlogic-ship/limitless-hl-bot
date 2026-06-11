@@ -152,8 +152,16 @@ def _collect_filled_trades(log_dir: Path) -> dict[str, dict[str, Any]]:
     return filled
 
 
+MAX_CLAIM_REVERTS = 3
+
+
 def _load_claimed(claims_path: Path) -> set[str]:
+    """Slugs we should no longer attempt: claimed, empty, or permanently
+    failed. A reverted redeemPositions used to retry every 60s forever,
+    burning gas (audit 2026-06-11); after MAX_CLAIM_REVERTS on-chain reverts
+    the slug is abandoned (and flagged) instead."""
     claimed: set[str] = set()
+    reverts: dict[str, int] = {}
     if not claims_path.exists():
         return claimed
     for line in claims_path.read_text(encoding="utf-8").splitlines():
@@ -167,8 +175,13 @@ def _load_claimed(claims_path: Path) -> set[str]:
             empty = event == "nothing_to_claim"
             if (live_claimed or empty) and slug:
                 claimed.add(slug)
+            if event == "claim_error" and rec.get("error") == "receipt_status_not_success" and slug:
+                reverts[slug] = reverts.get(slug, 0) + 1
         except Exception:
             continue
+    for slug, n in reverts.items():
+        if n >= MAX_CLAIM_REVERTS:
+            claimed.add(slug)
     return claimed
 
 

@@ -84,6 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "Net-of-fee data 2026-06-10: >=$50 copies +0.21/trade, "
                         "<$50 copies negative.")
     p.add_argument("--live-max-per-day", type=int, default=30)
+    p.add_argument("--explore-max-per-day", type=int, default=8,
+                   help="Daily live cap while the lane is in the explore tier")
     p.add_argument("--live-daily-loss-stop", type=float, default=3.0)
     p.add_argument("--learner-db", default="tmp/limitless_hl/learner.sqlite3")
     p.add_argument("--live-jsonl-out", default="tmp/limitless_hl/copy_live.jsonl")
@@ -289,11 +291,17 @@ class LiveExecutor:
         flag = Path(a.arm_flag_dir) / f"gate_{_live_strategy(strategy)}.flag"
         if not a.live_allowed or not flag.exists():
             return
+        tier = "full"
+        try:
+            tier = json.loads(flag.read_text()).get("tier", "full")
+        except (json.JSONDecodeError, OSError):
+            pass
+        day_cap = a.live_max_per_day if tier == "full" else a.explore_max_per_day
         cur_day = int(time.time() // 86400)
         if cur_day != self.day_start:
             self.day_start = cur_day
             self.sent_today = self._count_sent_today()
-        if self.sent_today >= a.live_max_per_day:
+        if self.sent_today >= day_cap:
             _log(self.out_path, {"event": "live_skip", "reason": "max_per_day",
                                  "ts_ms": now_ms})
             return

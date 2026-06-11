@@ -42,6 +42,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jsonl-out", default="tmp/limitless_hl/gatekeeper.jsonl")
     p.add_argument("--loop-seconds", type=int, default=600)
     p.add_argument("--min-n", type=int, default=100)
+    p.add_argument("--explore-min-n", type=int, default=20,
+                   help="Exploration tier: best lane trades small even before "
+                        "full significance; a silent engine learns nothing")
+    p.add_argument("--explore-min-per-trade", type=float, default=0.05)
     p.add_argument("--since-ms", type=int, default=1781085600000)  # 2026-06-10 10:00Z restart
     p.add_argument("--divergence-window", type=int, default=30)
     p.add_argument("--divergence-usdc", type=float, default=0.15)
@@ -173,6 +177,21 @@ def conviction_stats(
     return _finalize_stats(pnls, wins, int(total))
 
 
+def decide_tier(stats: dict[str, float], passed: bool, *, explore_min_n: int,
+                explore_min_per_trade: float) -> str | None:
+    """'full' = significance proven; 'explore' = positive point estimate on a
+    real sample, trade at reduced caps to buy information; None = stay paper."""
+    if passed:
+        return "full"
+    if (
+        stats["n"] >= explore_min_n
+        and stats["pnl"] > 0
+        and stats["per_trade"] >= explore_min_per_trade
+    ):
+        return "explore"
+    return None
+
+
 def evaluate_gates(con: sqlite3.Connection, *, min_n: int, since_ms: int) -> dict[str, dict]:
     """Returns {lane: {passed, stats}} for copy, fade, model. Copy/fade gates
     judge the conviction subset because that is what live execution takes."""
@@ -255,8 +274,22 @@ def main() -> None:
                     for lane, info in gates.items():
                         flag = flags[lane]
                         st = info["stats"]
-                        if info["passed"] and not flag.exists():
-                            flag.write_text(json.dumps({"opened_ms": now_ms, **st}))
+                        target = decide_tier(
+                            st, info["passed"],
+                            explore_min_n=args.explore_min_n,
+                            explore_min_per_trade=args.explore_min_per_trade,
+                        )
+                        current = None
+                        if flag.exists():
+                            try:
+                                current = json.loads(flag.read_text()).get("tier", "full")
+                            except (json.JSONDecodeError, OSError):
+                                current = "full"
+
+                        if target and target != current:
+                            flag.write_text(json.dumps(
+                                {"tier": target, "opened_ms": now_ms, **st}))
+                            fail_streak[lane] = 0
                             if lane == "model" and args.manage_model_pm2:
                                 subprocess.run(
                                     ["pm2", "start", "ecosystem.config.cjs",
@@ -265,19 +298,17 @@ def main() -> None:
                                     cwd=str(Path.cwd()),
                                 )
                             _log(out_path, {"event": "gate_opened", "lane": lane,
-                                            **st, "ts_ms": now_ms})
+                                            "tier": target, **st, "ts_ms": now_ms})
                             tg_send(
-                                f"GATE OPENED: {lane} lane went live automatically. "
+                                f"GATE {target.upper()}: {lane} lane live at "
+                                f"{'full' if target == 'full' else 'reduced explore'} caps. "
                                 f"n={st['n']} wr={st['wr']:.0%} pnl={st['pnl']:+.2f} "
-                                f"(per-trade {st['per_trade']:+.3f}). $1 stakes, "
-                                "daily-loss stop active."
+                                f"(per-trade {st['per_trade']:+.3f}, "
+                                f"2-sigma lower {st['lower_bound']:+.3f})."
                             )
 
-                        # Re-close a gate whose cumulative stats no longer
-                        # pass (2 consecutive failing evaluations = hysteresis
-                        # against flapping). Fee-accounting fix 2026-06-10
-                        # showed an open gate can become unjustified.
-                        if flag.exists() and not info["passed"]:
+                        # Close when no tier is justified (2-eval hysteresis).
+                        if flag.exists() and target is None:
                             fail_streak[lane] += 1
                             if fail_streak[lane] >= 2:
                                 flag.unlink()
@@ -287,7 +318,7 @@ def main() -> None:
                                 _log(out_path, {"event": "gate_closed", "lane": lane,
                                                 **st, "ts_ms": now_ms})
                                 tg_send(
-                                    f"GATE CLOSED: {lane} lane no longer passes "
+                                    f"GATE CLOSED: {lane} lane lost its tier "
                                     f"(n={st['n']} per-trade {st['per_trade']:+.3f}). "
                                     "Back to paper."
                                 )

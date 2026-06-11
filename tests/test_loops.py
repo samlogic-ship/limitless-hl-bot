@@ -154,3 +154,16 @@ def test_copy_gate_rejects_statistically_insufficient_sample(tmp_path):
     gates = evaluate_gates(con, min_n=100, since_ms=1781085600000)
     assert gates["copy"]["stats"]["lower_bound"] < 0
     assert gates["copy"]["passed"] is False
+
+
+def test_decide_tier_explore_and_full():
+    from limitless_hl.gatekeeper import decide_tier
+
+    strong = {"n": 400, "pnl": 80.0, "per_trade": 0.2, "lower_bound": 0.05}
+    assert decide_tier(strong, True, explore_min_n=20, explore_min_per_trade=0.05) == "full"
+    promising = {"n": 24, "pnl": 4.6, "per_trade": 0.19, "lower_bound": -0.23}
+    assert decide_tier(promising, False, explore_min_n=20, explore_min_per_trade=0.05) == "explore"
+    weak = {"n": 24, "pnl": -1.0, "per_trade": -0.04, "lower_bound": -0.3}
+    assert decide_tier(weak, False, explore_min_n=20, explore_min_per_trade=0.05) is None
+    tiny = {"n": 5, "pnl": 3.0, "per_trade": 0.6, "lower_bound": -0.1}
+    assert decide_tier(tiny, False, explore_min_n=20, explore_min_per_trade=0.05) is None

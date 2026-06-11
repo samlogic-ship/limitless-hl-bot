@@ -290,6 +290,10 @@ def build_report(conn: sqlite3.Connection, *, seed_reports: Iterable[str | Path]
     # combined `resolved` list (slice bootstrapping) but never the headline —
     # mixing them previously reported backtest profit as realized PnL.
     return {
+        # Self-labeling so no consumer mistakes seeded backtest for live PnL
+        # (a reviewer read `combined` +100 as live performance 2026-06-11).
+        "headline_basis": "live_only",
+        "combined_includes_seeded_backtest": True,
         "fill_count": len(live_rows) + unresolved_count,
         "unresolved_count": unresolved_count,
         **_aggregate(live_rows),

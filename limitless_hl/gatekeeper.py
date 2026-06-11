@@ -56,14 +56,33 @@ def _q(con: sqlite3.Connection, sql: str, params: tuple = ()) -> list[sqlite3.Ro
     return con.execute(sql, params).fetchall()
 
 
+def _finalize_stats(pnls: list[float], wins: int, total_entered: int) -> dict[str, float]:
+    """Mean, win rate, and a 2-sigma significance bound plus resolution coverage.
+    The audit (2026-06-11) showed +0.05/trade at n=100 is ~0.5 SE of noise and
+    that resolved-only INNER JOINs hide a pending tail (survivorship)."""
+    n = len(pnls)
+    if n == 0:
+        return {"n": 0, "wr": 0.0, "pnl": 0.0, "per_trade": 0.0,
+                "se": 0.0, "lower_bound": 0.0, "coverage": 0.0}
+    mean = sum(pnls) / n
+    var = sum((x - mean) ** 2 for x in pnls) / max(n - 1, 1)
+    se = (var ** 0.5) / (n ** 0.5)
+    return {
+        "n": n, "wr": wins / n, "pnl": sum(pnls), "per_trade": mean,
+        "se": se, "lower_bound": mean - 2 * se,
+        "coverage": n / total_entered if total_entered else 0.0,
+    }
+
+
 def lane_stats(con: sqlite3.Connection, strategy: str, since_ms: int) -> dict[str, float]:
-    row = _q(con,
-        "SELECT COUNT(*) n, COALESCE(SUM(r.won),0) w, COALESCE(SUM(r.pnl_usdc),0) pnl "
-        "FROM trades t JOIN resolutions r ON t.trade_key=r.trade_key "
-        "WHERE t.strategy=? AND t.ts_ms > ?", (strategy, since_ms))[0]
-    n = int(row["n"])
-    return {"n": n, "wr": (row["w"] / n if n else 0.0), "pnl": float(row["pnl"]),
-            "per_trade": (float(row["pnl"]) / n if n else 0.0)}
+    rows = _q(con,
+        "SELECT r.pnl_usdc, r.won FROM trades t "
+        "JOIN resolutions r ON t.trade_key=r.trade_key "
+        "WHERE t.strategy=? AND t.ts_ms > ?", (strategy, since_ms))
+    total = _q(con, "SELECT COUNT(*) c FROM trades WHERE strategy=? AND ts_ms > ?",
+               (strategy, since_ms))[0]["c"]
+    return _finalize_stats([r["pnl_usdc"] for r in rows],
+                           sum(r["won"] for r in rows), int(total))
 
 
 def model_slice_stats(con: sqlite3.Connection, since_ms: int) -> dict[str, float]:
@@ -71,8 +90,8 @@ def model_slice_stats(con: sqlite3.Connection, since_ms: int) -> dict[str, float
         "SELECT t.raw_json, t.interval, t.price, r.won, r.pnl_usdc "
         "FROM trades t JOIN resolutions r ON t.trade_key=r.trade_key "
         "WHERE t.strategy='shadow_daemon' AND t.ts_ms > ?", (since_ms,))
-    n = w = 0
-    pnl = 0.0
+    pnls: list[float] = []
+    wins = 0
     for r in rows:
         try:
             c = (json.loads(r["raw_json"]).get("candidate")) or {}
@@ -83,11 +102,11 @@ def model_slice_stats(con: sqlite3.Connection, since_ms: int) -> dict[str, float
             r["interval"] == "15m" and 0.25 <= r["price"] <= 0.88
             and s is not None and s >= 2.0 and e is not None and 0.03 <= e <= 0.12
         ):
-            n += 1
-            w += r["won"]
-            pnl += r["pnl_usdc"]
-    return {"n": n, "wr": (w / n if n else 0.0), "pnl": pnl,
-            "per_trade": (pnl / n if n else 0.0)}
+            pnls.append(r["pnl_usdc"])
+            wins += r["won"]
+    total = _q(con, "SELECT COUNT(*) c FROM trades WHERE strategy='shadow_daemon' AND ts_ms > ?",
+               (since_ms,))[0]["c"]
+    return _finalize_stats(pnls, wins, int(total))
 
 
 def recent_per_trade(con: sqlite3.Connection, strategy: str, window: int) -> tuple[int, float]:
@@ -105,7 +124,7 @@ def live_pnl_today(con: sqlite3.Connection) -> float:
         "SELECT COALESCE(SUM(r.pnl_usdc),0) FROM trades t "
         "JOIN resolutions r ON t.trade_key=r.trade_key "
         "WHERE t.strategy IN ('copy_live','fade_live','scored_daemon') "
-        "AND r.resolved_at_ms >= ?", (day_start,))[0]
+        "AND t.ts_ms >= ?", (day_start,))[0]
     return float(row[0] or 0.0)
 
 
@@ -137,8 +156,8 @@ def conviction_stats(
         "SELECT t.raw_json, r.won, r.pnl_usdc "
         "FROM trades t JOIN resolutions r ON t.trade_key=r.trade_key "
         "WHERE t.strategy=? AND t.ts_ms > ?", (strategy, since_ms))
-    n = w = 0
-    pnl = 0.0
+    pnls: list[float] = []
+    wins = 0
     for r in rows:
         try:
             cand = (json.loads(r["raw_json"]).get("candidate")) or {}
@@ -147,11 +166,11 @@ def conviction_stats(
         stake = cand.get("shark_stake_usdc")
         if stake is None or float(stake) < min_stake:
             continue
-        n += 1
-        w += r["won"]
-        pnl += r["pnl_usdc"]
-    return {"n": n, "wr": (w / n if n else 0.0), "pnl": pnl,
-            "per_trade": (pnl / n if n else 0.0)}
+        pnls.append(r["pnl_usdc"])
+        wins += r["won"]
+    total = _q(con, "SELECT COUNT(*) c FROM trades WHERE strategy=? AND ts_ms > ?",
+               (strategy, since_ms))[0]["c"]
+    return _finalize_stats(pnls, wins, int(total))
 
 
 def evaluate_gates(con: sqlite3.Connection, *, min_n: int, since_ms: int) -> dict[str, dict]:
@@ -162,12 +181,22 @@ def evaluate_gates(con: sqlite3.Connection, *, min_n: int, since_ms: int) -> dic
         st = conviction_stats(con, strat, since_ms)
         out[lane] = {
             "stats": st,
-            "passed": st["n"] >= min_n and st["pnl"] > 0 and st["per_trade"] >= 0.05,
+            # Open only when the 2-sigma LOWER bound of per-trade PnL clears
+            # zero (audit: a point estimate of +0.05 at n=100 passes pure
+            # luck ~30% of the time) and >=70% of entered trades resolved.
+            "passed": (
+                st["n"] >= min_n and st["pnl"] > 0
+                and st["lower_bound"] > 0.0
+                and st["coverage"] >= 0.70
+            ),
         }
     st = model_slice_stats(con, since_ms)
     out["model"] = {
         "stats": st,
-        "passed": st["n"] >= min_n and st["wr"] >= 0.52 and st["pnl"] > 0,
+        "passed": (
+            st["n"] >= min_n and st["wr"] >= 0.52 and st["pnl"] > 0
+            and st["lower_bound"] > 0.0
+        ),
     }
     return out
 
@@ -206,7 +235,8 @@ def main() -> None:
             con = sqlite3.connect(f"file:{args.learner_db}?mode=ro", uri=True, timeout=5)
             con.row_factory = sqlite3.Row
             try:
-                gates = evaluate_gates(con, min_n=args.min_n, since_ms=args.since_ms)
+                window_since = max(args.since_ms, now_ms - 48 * 3600 * 1000)
+                gates = evaluate_gates(con, min_n=args.min_n, since_ms=window_since)
 
                 # Kill switch first
                 today = live_pnl_today(con)
@@ -262,19 +292,26 @@ def main() -> None:
                                     "Back to paper."
                                 )
                                 fail_streak[lane] = 0
-                        elif info["passed"]:
+                        elif not flag.exists():
                             fail_streak[lane] = 0
 
-                        # Divergence pause for open gates
+                        # Divergence pause for open gates. Two triggers:
+                        # (a) steady state: live trails paper over the window;
+                        # (b) ramp-up: absolute live floor at small n, because
+                        #     waiting for 30 resolved live trades leaves the
+                        #     breaker unreachable for weeks (audit F8).
                         if flag.exists():
                             ln, live_pt = recent_per_trade(
                                 con, live_strat[lane], args.divergence_window)
                             pn, paper_pt = recent_per_trade(
                                 con, paper_strat[lane], args.divergence_window)
                             if (
-                                ln >= args.divergence_window
-                                and pn >= args.divergence_window
-                                and live_pt < paper_pt - args.divergence_usdc
+                                (ln >= 8 and live_pt < -0.10)
+                                or (
+                                    ln >= args.divergence_window
+                                    and pn >= args.divergence_window
+                                    and live_pt < paper_pt - args.divergence_usdc
+                                )
                             ):
                                 flag.unlink()
                                 if lane == "model" and args.manage_model_pm2:

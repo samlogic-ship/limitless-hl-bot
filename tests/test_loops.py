@@ -39,11 +39,12 @@ def _conviction_raw(stake=80.0):
     return json.dumps({"candidate": {"shark_stake_usdc": stake}})
 
 
-def test_copy_gate_opens_on_positive_ev(tmp_path):
+def test_copy_gate_opens_on_significant_positive_ev(tmp_path):
     db = tmp_path / "l.sqlite3"
     rows = []
-    # 120 conviction copies (shark stake >= $50), 40% WR, winners pay 2.0
-    for i in range(120):
+    # 400 conviction copies, 40% WR, winners pay 2.0 -> mean +0.2, and at
+    # n=400 the 2-sigma lower bound (+0.05) clears zero.
+    for i in range(400):
         won = 1 if i % 5 < 2 else 0
         rows.append(("copy_shadow", "15m", 0.4, _conviction_raw(), won,
                      2.0 if won else -1.0, 1781085600001 + i))
@@ -134,4 +135,22 @@ def test_copy_gate_ignores_small_stake_copies(tmp_path):
     con.row_factory = sqlite3.Row
     gates = evaluate_gates(con, min_n=100, since_ms=1781085600000)
     assert gates["copy"]["stats"]["n"] == 0
+    assert gates["copy"]["passed"] is False
+
+
+def test_copy_gate_rejects_statistically_insufficient_sample(tmp_path):
+    # Audit 2026-06-11: +0.2/trade at n=120 has a 2-sigma lower bound BELOW
+    # zero (se ~0.134) — must NOT open, even though the point estimate looks
+    # great. Encodes the "0.5 sigma gate" finding.
+    db = tmp_path / "l.sqlite3"
+    rows = []
+    for i in range(120):
+        won = 1 if i % 5 < 2 else 0
+        rows.append(("copy_shadow", "15m", 0.4, _conviction_raw(), won,
+                     2.0 if won else -1.0, 1781085600001 + i))
+    _learner_db(db, rows)
+    con = sqlite3.connect(db)
+    con.row_factory = sqlite3.Row
+    gates = evaluate_gates(con, min_n=100, since_ms=1781085600000)
+    assert gates["copy"]["stats"]["lower_bound"] < 0
     assert gates["copy"]["passed"] is False

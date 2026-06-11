@@ -206,6 +206,7 @@ class LiveExecutor:
         self.submitter: LimitlessSubmitter | None = None
         self.disabled_reason: str | None = None
         self.disabled_at: float = 0.0
+        self.day_start = int(time.time() // 86400)
         self.sent_today = self._count_sent_today()
 
     def _count_sent_today(self) -> int:
@@ -288,6 +289,10 @@ class LiveExecutor:
         flag = Path(a.arm_flag_dir) / f"gate_{_live_strategy(strategy)}.flag"
         if not a.live_allowed or not flag.exists():
             return
+        cur_day = int(time.time() // 86400)
+        if cur_day != self.day_start:
+            self.day_start = cur_day
+            self.sent_today = self._count_sent_today()
         if self.sent_today >= a.live_max_per_day:
             _log(self.out_path, {"event": "live_skip", "reason": "max_per_day",
                                  "ts_ms": now_ms})
@@ -311,7 +316,16 @@ class LiveExecutor:
                 live_cand, details, client_order_id=client_order_id
             )
             assert self.submitter is not None
+            if not flag.exists():  # gate may have been revoked while we built the intent
+                _log(self.out_path, {"event": "live_skip", "reason": "gate_revoked",
+                                     "ts_ms": now_ms})
+                return
             result = self.submitter.submit_intent(intent)
+            if not result.get("matched"):
+                # FAK missed the book: no position, no daily slot burned.
+                _log(self.out_path, {"event": "live_unmatched", "slug": candidate.get("slug"),
+                                     "limitless_result": result, "ts_ms": now_ms})
+                return
             self.sent_today += 1
             _log(self.out_path, {
                 "event": "live_trade",

@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS trades (
     raw_json TEXT NOT NULL,
     inserted_at_ms INTEGER NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_source_line ON trades(source_path, line_no);
+CREATE INDEX IF NOT EXISTS idx_trades_source_line2 ON trades(source_path, line_no);
 CREATE INDEX IF NOT EXISTS idx_trades_slug ON trades(slug);
 CREATE INDEX IF NOT EXISTS idx_trades_slice ON trades(interval, symbol, side);
 
@@ -159,7 +159,7 @@ def ingest_jsonl(conn: sqlite3.Connection, paths: Iterable[str | Path], *, now_m
 
 
 def trade_from_event(payload: dict[str, Any], *, source: str, source_path: str, line_no: int) -> LearnedTrade | None:
-    if payload.get("event") != "trade":
+    if payload.get("event") not in ("trade", "live_trade"):
         return None
     if source == "daemon":
         return _daemon_trade(payload, source=source, source_path=source_path, line_no=line_no)
@@ -469,7 +469,7 @@ def main() -> None:
                     if not log_path.exists():
                         continue
                     has_trades = any(
-                        '"event": "trade"' in line
+                        '"event": "trade"' in line or '"event": "live_trade"' in line
                         for line in log_path.read_text(encoding="utf-8").splitlines()[-400:]
                     )
                     if not has_trades:
@@ -584,7 +584,9 @@ def _make_trade(
     ts_ms = int(_to_float(payload.get("ts_ms")) or 0)
     if ts_ms <= 0:
         return None
-    key = f"{source}:{slug}:{side}:{ts_ms}:{line_no}"
+    # Identity is content-based (rotation/rewrite of the jsonl must not
+    # re-ingest the same logical trade under a new line number).
+    key = f"{source}:{slug}:{side}:{ts_ms}"
     return LearnedTrade(
         trade_key=key,
         source=source,

@@ -154,9 +154,13 @@ def refit(db_path: str, strategies: list[str], *, min_n: int, min_auc: float) ->
     split = int(n * 0.75)
     x_all = [r[0] for r in rows]
     y_all = [r[1] for r in rows]
-    z_all, mean, std = _standardize(x_all)
-    w = fit_logistic(z_all[:split], y_all[:split])
-    test_scores = [predict(w, xi) for xi in z_all[split:]]
+    # Standardize on TRAIN ONLY; applying full-set mean/std leaks test
+    # distribution into training (audit F12).
+    z_train, mean, std = _standardize(x_all[:split])
+    z_test = [[(row[j] - mean[j]) / std[j] for j in range(len(mean))]
+              for row in x_all[split:]]
+    w = fit_logistic(z_train, y_all[:split])
+    test_scores = [predict(w, xi) for xi in z_test]
     test_labels = y_all[split:]
     a = auc(test_scores, test_labels)
     brier = sum((p - y) ** 2 for p, y in zip(test_scores, test_labels)) / len(test_labels)

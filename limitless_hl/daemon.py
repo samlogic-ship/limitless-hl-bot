@@ -74,6 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-price", type=float, default=0.85)
     p.add_argument("--min-price", type=float, default=0.0,
                    help="Reject candidates priced below this; sub-0.20 longshots lose to the 3% taker fee")
+    p.add_argument("--exclude-price-band", type=float, nargs=2, default=None,
+                   metavar=("LO", "HI"),
+                   help="Reject candidates with LO <= price < HI; the 0.45-0.55 coinflip band loses to the taker fee (validated on 723 resolved fills)")
     p.add_argument("--max-edge", type=float, default=1.0,
                    help="Reject candidates whose claimed edge exceeds this; very large model-vs-market gaps are adverse selection, not alpha")
     p.add_argument("--min-seconds-to-expiry", type=int, default=180)
@@ -238,6 +241,19 @@ def _ensure_eoa_mode() -> None:
         print(json.dumps({"event": "profile_eoa_warn", "error": str(exc)}), flush=True)
 
 
+def _price_block_reason(price, min_price, exclude_band):
+    """Return a reason string if this entry price should be rejected, else None.
+
+    Two cuts validated on 723 resolved fills: sub-min longshots (<0.35) and the
+    coinflip exclusion band (0.45-0.55) both lose to the 3% taker fee at any score.
+    """
+    if min_price and min_price > 0 and price < min_price:
+        return "below_min_price"
+    if exclude_band and exclude_band[0] <= price < exclude_band[1]:
+        return "in_exclude_band"
+    return None
+
+
 def main() -> None:
     args = build_parser().parse_args()
 
@@ -381,10 +397,12 @@ def main() -> None:
             for cand in candidates:
                 price = float(cand.get("limit_price") or 0.0)
                 edge = float(cand.get("edge") or 0.0)
-                if args.min_price > 0 and price < args.min_price:
+                _pb = _price_block_reason(price, args.min_price, args.exclude_price_band)
+                if _pb is not None:
                     _log(out_path, {
                         "event": "price_blocked", "slug": cand.get("slug"), "side": cand.get("side"),
-                        "price": price, "min_price": args.min_price, "ts_ms": now_ms,
+                        "price": price, "reason": _pb, "min_price": args.min_price,
+                        "exclude_band": args.exclude_price_band, "ts_ms": now_ms,
                     })
                     continue
                 if edge > args.max_edge:

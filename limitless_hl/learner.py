@@ -585,8 +585,9 @@ def _make_trade(
     if ts_ms <= 0:
         return None
     # Identity is content-based (rotation/rewrite of the jsonl must not
-    # re-ingest the same logical trade under a new line number).
-    key = f"{source}:{slug}:{side}:{ts_ms}"
+    # re-ingest the same logical trade under a new line number). Strategy is
+    # part of the identity: a live fill and its paper twin share slug/side/ts.
+    key = f"{source}:{slug}:{side}:{ts_ms}:{strategy}"
     return LearnedTrade(
         trade_key=key,
         source=source,

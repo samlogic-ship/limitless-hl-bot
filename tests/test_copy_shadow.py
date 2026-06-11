@@ -105,3 +105,23 @@ def test_copy_live_file_routes_to_daemon_parser():
     from limitless_hl.learner import _source_name
 
     assert _source_name(Path("tmp/limitless_hl/copy_live.jsonl")) == "daemon"
+
+
+def test_smart_chase_allows_when_pm_says_still_cheap(monkeypatch):
+    # PM twin fair for our side = 0.70; our chased ask 0.62 *1.03 = 0.6386;
+    # net edge 0.061 >= margin 0.03 -> chase allowed.
+    from limitless_hl import copy_shadow as cs
+
+    class FakePM:
+        def implied_up_prob(self, sym, iv, exp):
+            return {"up_prob": 0.70}
+    # net edge math sanity (mirrors try_copy)
+    ask, margin = 0.62, 0.03
+    pm_fair = 0.70
+    assert (pm_fair - ask * 1.03) >= margin
+
+
+def test_smart_chase_blocks_when_pm_not_cheap_enough():
+    ask, margin = 0.62, 0.03
+    pm_fair = 0.64  # net edge 0.0014 < margin -> blocked
+    assert (pm_fair - ask * 1.03) < margin

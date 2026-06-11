@@ -39,6 +39,7 @@ import os
 import requests
 
 from .clients import LimitlessClient
+from .polymarket_feed import PolymarketFeed
 from .live_trade import (
     LimitlessCredentials,
     LimitlessOrderBuilder,
@@ -70,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
                         "the 2026-06-10 expansion to 38 sharks diluted edge")
     p.add_argument("--min-seconds-to-expiry", type=int, default=120)
     p.add_argument("--max-chase", type=float, default=0.06)
+    p.add_argument("--smart-chase", action="store_true", default=True,
+                   help="When price ran past the shark, still copy if the "
+                        "Polymarket twin says our new price is below fair")
+    p.add_argument("--smart-chase-margin", type=float, default=0.03,
+                   help="Required PM-fair minus our fee-adjusted ask to chase")
+    p.add_argument("--smart-chase-max", type=float, default=0.15,
+                   help="Never chase further than this beyond the shark price")
     p.add_argument("--min-price", type=float, default=0.05)
     p.add_argument("--max-price", type=float, default=0.92)
     p.add_argument("--stake-usdc", type=float, default=1.0)
@@ -358,6 +366,7 @@ class CopyShadow:
         self.out_path = Path(args.jsonl_out)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         self.client = LimitlessClient()
+        self.polymarket = PolymarketFeed()
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
         self.copied = _load_copied(self.out_path)
@@ -505,11 +514,29 @@ class CopyShadow:
             _log(self.out_path, {"event": "copy_skip", "reason": "price_out_of_band",
                                  "slug": hit["market_slug"], "ask": ask, "ts_ms": now_ms})
             return
-        if ask > ref_px + a.max_chase:
+        chased = ask > ref_px + a.max_chase
+        chase_ok = False
+        pm_fair = None
+        if chased and a.smart_chase and ask <= ref_px + a.smart_chase_max:
+            # Consult the Polymarket twin: is our higher price STILL below fair?
+            pm = self.polymarket.implied_up_prob(
+                hit["symbol"], hit["interval"], hit["expiration_ms"])
+            if pm is not None:
+                up_prob = float(pm.get("up_prob") or 0.0)
+                pm_fair = up_prob if our_side == "UP" else 1.0 - up_prob
+                # fee-adjusted: we redeem shares net of the 3% taker fee
+                net_edge = pm_fair - ask * 1.03
+                chase_ok = net_edge >= a.smart_chase_margin
+        if chased and not chase_ok:
             _log(self.out_path, {"event": "copy_skip", "reason": "chased_too_far",
                                  "slug": hit["market_slug"], "shark_px": hit["price"],
-                                 "ref_px": ref_px, "ask": ask, "ts_ms": now_ms})
+                                 "ref_px": ref_px, "ask": ask,
+                                 "pm_fair": pm_fair, "ts_ms": now_ms})
             return
+        if chased and chase_ok:
+            _log(self.out_path, {"event": "smart_chase", "slug": hit["market_slug"],
+                                 "shark_px": hit["price"], "ask": ask,
+                                 "pm_fair": pm_fair, "ts_ms": now_ms})
         self.copied.add(key)
         detect_lag_s = max(0.0, (now_ms - hit["created_at_ms"]) / 1000)
         _log(self.out_path, {

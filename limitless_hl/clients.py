@@ -7,6 +7,10 @@ import requests
 
 from .model import LimitlessMarket, OrderBook
 from .attribution import ResolvedMarket
+from .http_cache import cached_get_json
+
+import os
+_ACTIVE_MARKETS_TTL = float(os.environ.get("LIMITLESS_ACTIVE_MARKETS_TTL", "20"))
 
 UP_DOWN_MARKET_RE = re.compile(r"^([A-Z0-9]{2,12}) Up or Down - (5 Min|15 Min|Hourly|Daily|Weekly)$")
 
@@ -21,13 +25,14 @@ class LimitlessClient:
     def active_crypto_markets(self, pages: int = 8, limit: int = 25) -> list[LimitlessMarket]:
         markets: list[LimitlessMarket] = []
         for page in range(1, pages + 1):
-            payload = self.session.get(
+            data = cached_get_json(
+                self.session,
                 f"{self.base_url}/markets/active",
-                params={"page": page, "limit": min(limit, 25), "tradeType": "clob"},
+                {"page": page, "limit": min(limit, 25), "tradeType": "clob"},
+                ttl=_ACTIVE_MARKETS_TTL,
                 timeout=self.timeout,
             )
-            payload.raise_for_status()
-            rows = self.parse_active_markets(payload.json())
+            rows = self.parse_active_markets(data)
             markets.extend(rows)
         return markets
 

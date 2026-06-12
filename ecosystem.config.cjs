@@ -158,7 +158,7 @@ module.exports = {
       interpreter: "none",
       args: [
         "--noprofile", "--norc", "-c",
-        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.maker --live-armed --intervals 1h --symbols AUTO --margin 0.05 --quote-size-usdc 1.5 --max-total-locked-usdc 8 --max-inventory-usdc 4 --max-markets 3 --min-seconds-to-expiry 600 --loop-seconds 10 --jsonl-out tmp/limitless_hl/maker_trades.jsonl`,
+        `${LOAD_ENV}; ${LIMITLESS_ENV} "${PYTHON}" -m limitless_hl.maker --live-armed --intervals 1h --symbols AUTO --margin 0.05 --quote-size-usdc 1.5 --max-total-locked-usdc 8 --max-inventory-usdc 4 --max-markets 3 --min-seconds-to-expiry 600 --loop-seconds 30 --jsonl-out tmp/limitless_hl/maker_trades.jsonl`,
       ],
       cwd: ROOT,
       autorestart: true,

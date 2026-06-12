@@ -58,7 +58,6 @@ class Candidate:
     seconds_to_expiry: int
     stake_usdc: float
     expected_value_usdc: float
-    hyperliquid_hedge_side: Literal["LONG", "SHORT"]
     annualized_volatility: float
     reason: str
 
@@ -132,9 +131,9 @@ def choose_candidate(
         return None
 
     candidates: list[Candidate] = []
-    for side, ask, ask_size, hedge_side in (
-        ("UP", book.up_ask, book.up_ask_size, "SHORT"),
-        ("DOWN", book.down_ask, book.down_ask_size, "LONG"),
+    for side, ask, ask_size in (
+        ("UP", book.up_ask, book.up_ask_size),
+        ("DOWN", book.down_ask, book.down_ask_size),
     ):
         if ask <= 0 or ask > config.max_price:
             continue
@@ -170,7 +169,6 @@ def choose_candidate(
                 seconds_to_expiry=seconds_to_expiry,
                 stake_usdc=stake,
                 expected_value_usdc=stake * edge,
-                hyperliquid_hedge_side=hedge_side,  # type: ignore[arg-type]
                 annualized_volatility=volatility,
                 reason=(
                     f"{market.symbol} {side} fair={fair:.3f} ask={ask:.3f} "

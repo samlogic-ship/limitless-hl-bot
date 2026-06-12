@@ -50,7 +50,6 @@ def test_choose_candidate_requires_positive_edge_and_liquidity() -> None:
     assert candidate.side == "UP"
     assert candidate.limit_price == 0.70
     assert candidate.edge > 0.03
-    assert candidate.hyperliquid_hedge_side == "SHORT"
 
 
 def test_choose_candidate_rejects_stale_expired_and_thin_books() -> None:

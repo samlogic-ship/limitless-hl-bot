@@ -4,7 +4,8 @@ Scans every --loop-seconds, gates each candidate through RiskManager,
 executes via PairTradeRunner, and logs every event to JSONL.
 
 Dry-run by default (preview legs, no real orders).
-Pass --live-armed + --hedge-live for real execution.
+Pass --live-armed for real execution. Limitless-only: the Hyperliquid hedge
+leg was removed 2026-06-12 (this arb runs unhedged).
 Required env for live: LIMITLESS_OWNER_ID, LIMITLESS_MAKER_ADDRESS, LIMITLESS_FEE_RATE_BPS.
 """
 from __future__ import annotations
@@ -20,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from .clients import HyperliquidClient, LimitlessClient
-from .hyperliquid_hedge import MIN_HEDGE_NOTIONAL_USD, HyperliquidHedgerConfig, HyperliquidMarketHedger
 from .live_trade import (
     LimitlessCredentials,
     LimitlessOrderBuilder,
@@ -55,11 +55,6 @@ class _PreviewLeg:
         }
 
 
-class _PreviewHedger:
-    def hedge(self, plan: Any) -> dict[str, Any]:
-        return {"submitted": True, "plan": asdict(plan), "raw": {"mode": "preview"}}
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -73,7 +68,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-edge", type=float, default=0.08)
     p.add_argument("--max-price", type=float, default=0.85)
     p.add_argument("--min-price", type=float, default=0.0,
-                   help="Reject candidates priced below this; sub-0.20 longshots lose to the 3% taker fee")
+                   help="Reject candidates priced below this; sub-0.20 longshots lose to the 3 percent taker fee")
     p.add_argument("--exclude-price-band", type=float, nargs=2, default=None,
                    metavar=("LO", "HI"),
                    help="Reject candidates with LO <= price < HI; the 0.45-0.55 coinflip band loses to the taker fee (validated on 723 resolved fills)")
@@ -94,9 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Learner DB consulted for the loss-cooldown gate")
     # Execution mode
     p.add_argument("--live-armed", action="store_true", help="Enable real Limitless order submission")
-    p.add_argument("--hedge-live", action="store_true", help="Enable real Hyperliquid hedge; requires --live-armed")
-    p.add_argument("--allow-unhedged-live", action="store_true", help="Allow Limitless-only live fills without HL hedge")
-    p.add_argument("--max-hedge-notional-usdc", type=float, default=25.0)
     p.add_argument("--client-order-prefix", default="limitless-hl")
     p.add_argument("--symbols", default="", help="Comma-separated candidate symbols to allow")
     p.add_argument("--intervals", default="", help="Comma-separated candidate intervals to allow")
@@ -159,7 +151,7 @@ def _build_runner(
     intent = candidate_to_limitless_intent(candidate, details, client_order_id=client_order_id)
 
     if not args.live_armed:
-        return PairTradeRunner(limitless=_PreviewLeg(intent), hedger=_PreviewHedger())
+        return PairTradeRunner(limitless=_PreviewLeg(intent))
 
     # Live path — resolve credentials
     token_id = get_secret("LIMITLESS_TOKEN_ID")
@@ -182,9 +174,6 @@ def _build_runner(
     if missing:
         raise RuntimeError(f"--live-armed but missing credentials: {', '.join(missing)}")
 
-    if not args.hedge_live and not args.allow_unhedged_live:
-        raise RuntimeError("--live-armed requires --hedge-live; refusing one-sided Limitless order")
-
     # Smart wallet address — maker in all orders; EOA (maker_address) is the signer.
     smart_wallet = os.environ.get("LIMITLESS_SMART_WALLET") or maker_address or ""
     eoa_address  = maker_address or ""
@@ -201,18 +190,12 @@ def _build_runner(
         ),
         private_key=private_key or "",
     )
-    hedger = HyperliquidMarketHedger(
-        HyperliquidHedgerConfig(
-            live=True,
-            max_notional_usdc=args.max_hedge_notional_usdc,
-        )
-    )
 
     class _LiveLeg:
         def submit(self, candidate: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
             return submitter.submit_intent(intent)
 
-    return PairTradeRunner(limitless=_LiveLeg(), hedger=hedger, require_hedge=args.hedge_live)
+    return PairTradeRunner(limitless=_LiveLeg())
 
 
 # ---------------------------------------------------------------------------
@@ -258,17 +241,8 @@ def main() -> None:
     args = build_parser().parse_args()
 
     if args.live_armed:
-        if args.hedge_live and args.stake_usdc < MIN_HEDGE_NOTIONAL_USD:
-            raise SystemExit(
-                f"--live-armed requires --stake-usdc >= {MIN_HEDGE_NOTIONAL_USD:.2f} "
-                "so the Hyperliquid hedge can meet minimum order notional"
-            )
-        if args.hedge_live and args.max_hedge_notional_usdc < args.stake_usdc:
-            raise SystemExit("--live-armed requires --max-hedge-notional-usdc >= --stake-usdc")
-        if args.allow_unhedged_live and args.hedge_live:
-            raise SystemExit("choose either --hedge-live or --allow-unhedged-live, not both")
-        if args.allow_unhedged_live and args.stake_usdc > 5:
-            raise SystemExit("--allow-unhedged-live is capped at --stake-usdc 5 for the pilot")
+        if args.stake_usdc > 5:
+            raise SystemExit("live stake is capped at --stake-usdc 5 for the unhedged pilot")
         _ensure_eoa_mode()
 
     pricing = None if args.flat_pricing else PricingProvider()

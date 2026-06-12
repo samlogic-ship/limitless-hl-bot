@@ -6,7 +6,6 @@ import os
 import time
 
 from .clients import HyperliquidClient, LimitlessClient
-from .hyperliquid_hedge import HyperliquidHedgerConfig, HyperliquidMarketHedger
 from .live_trade import (
     LimitlessCredentials,
     LimitlessOrderBuilder,
@@ -33,11 +32,6 @@ class PreviewLeg:
         }
 
 
-class PreviewHedger:
-    def hedge(self, plan):
-        return {"submitted": False, "plan": plan.__dict__, "raw": {"mode": "preview"}}
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Preview or run a Limitless <> Hyperliquid pair trade")
     parser.add_argument("--live-armed", action="store_true")
@@ -45,9 +39,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-price", type=float, default=0.85)
     parser.add_argument("--min-seconds-to-expiry", type=int, default=180)
     parser.add_argument("--stake-usdc", type=float, default=25.0)
-    parser.add_argument("--hedge-live", action="store_true")
-    parser.add_argument("--max-hedge-notional-usdc", type=float, default=5.0)
-    parser.add_argument("--hyperliquid-env-file", default=".env.hyperliquid")
     parser.add_argument("--client-order-prefix", default="limitless-hl")
     return parser
 
@@ -75,7 +66,7 @@ def main() -> None:
     client_order_id = f"{args.client_order_prefix}-{candidate['slug']}-{candidate['side']}-{int(time.time() * 1000)}"
     intent = candidate_to_limitless_intent(candidate, details, client_order_id=client_order_id)
     if not args.live_armed:
-        runner = PairTradeRunner(limitless=PreviewLeg(intent), hedger=PreviewHedger())
+        runner = PairTradeRunner(limitless=PreviewLeg(intent))
         print(json.dumps(runner.run(candidate).to_dict(), indent=2, sort_keys=True))
         return
 
@@ -103,22 +94,12 @@ def main() -> None:
         ),
         private_key=private_key or "",
     )
-    if not args.hedge_live:
-        raise SystemExit("live armed but --hedge-live is missing; refusing one-sided Limitless order")
-    hedger = HyperliquidMarketHedger(
-        HyperliquidHedgerConfig(
-            live=True,
-            env_file=args.hyperliquid_env_file,
-            max_notional_usdc=args.max_hedge_notional_usdc,
-        )
-    )
     runner = PairTradeRunner(
         limitless=type(
             "LiveLimitlessLeg",
             (),
             {"submit": lambda _self, candidate: submitter.submit_intent(intent)},
         )(),
-        hedger=hedger,
     )
     print(json.dumps(runner.run(candidate).to_dict(), indent=2, sort_keys=True))
 

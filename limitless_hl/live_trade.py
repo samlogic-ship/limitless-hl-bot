@@ -141,23 +141,6 @@ class LimitlessSubmitter:
         }
 
 
-@dataclass(frozen=True, slots=True)
-class HedgePlan:
-    symbol: str
-    side: Literal["LONG", "SHORT"]
-    notional_usdc: float
-    reference_price: float
-
-    @property
-    def size(self) -> float:
-        return self.notional_usdc / self.reference_price if self.reference_price > 0 else 0.0
-
-
-class Hedger(Protocol):
-    def hedge(self, plan: HedgePlan) -> dict[str, Any]:
-        ...
-
-
 class LimitlessLeg(Protocol):
     def submit(self, candidate: dict[str, Any]) -> dict[str, Any]:
         ...
@@ -186,10 +169,11 @@ class PairTradeResult:
 
 
 class PairTradeRunner:
-    def __init__(self, limitless: LimitlessLeg, hedger: Hedger, require_hedge: bool = True):
+    """Limitless-only execution. The Hyperliquid hedge leg was removed 2026-06-12
+    (this arb runs unhedged); the result shape is kept for log compatibility."""
+
+    def __init__(self, limitless: LimitlessLeg):
         self.limitless = limitless
-        self.hedger = hedger
-        self.require_hedge = require_hedge
 
     def run(self, candidate: dict[str, Any]) -> PairTradeResult:
         limitless_result = self.limitless.submit(candidate)
@@ -199,43 +183,10 @@ class PairTradeRunner:
                 candidate=dict(candidate),
                 limitless_result=limitless_result,
             )
-        filled_usdc = float(limitless_result.get("filled_usdc") or candidate.get("stake_usdc") or 0)
-        if not self.require_hedge:
-            return PairTradeResult(
-                state=TradeState.LIMITLESS_FILLED_UNHEDGED,
-                candidate=dict(candidate),
-                limitless_result=limitless_result,
-            )
-        hedge_notional = estimate_delta_hedge_notional(candidate, filled_usdc)
-        plan = HedgePlan(
-            symbol=str(candidate["symbol"]),
-            side=str(candidate["hyperliquid_hedge_side"]),  # type: ignore[arg-type]
-            notional_usdc=hedge_notional,
-            reference_price=float(candidate["hyperliquid_mid"]),
-        )
-        try:
-            hedge_result = self.hedger.hedge(plan)
-        except Exception as exc:
-            return PairTradeResult(
-                state=TradeState.HEDGE_FAILED,
-                candidate=dict(candidate),
-                limitless_result=limitless_result,
-                error=str(exc),
-            )
-        if not bool(hedge_result.get("submitted")):
-            reason = str(hedge_result.get("reason") or "not_submitted")
-            return PairTradeResult(
-                state=TradeState.HEDGE_FAILED,
-                candidate=dict(candidate),
-                limitless_result=limitless_result,
-                hedge_result=hedge_result,
-                error=f"hedge_not_submitted: {reason}",
-            )
         return PairTradeResult(
-            state=TradeState.HEDGED,
+            state=TradeState.LIMITLESS_FILLED_UNHEDGED,
             candidate=dict(candidate),
             limitless_result=limitless_result,
-            hedge_result=hedge_result,
         )
 
 
@@ -309,18 +260,6 @@ def candidate_to_limitless_intent(
         verifying_contract=verifying_contract,
         client_order_id=client_order_id,
     )
-
-
-class CommandHedger:
-    def __init__(self, command_template: str):
-        self.command_template = command_template
-
-    def hedge(self, plan: HedgePlan) -> dict[str, Any]:
-        raise RuntimeError(
-            "CommandHedger is configured but not auto-executed by this module; "
-            "wire it to the existing Hyperliquid executor after validating command idempotency. "
-            f"plan={asdict(plan)}"
-        )
 
 
 def sign_hmac_headers(

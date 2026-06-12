@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from limitless_hl.live_trade import (
-    HedgePlan,
     LimitlessCredentials,
     LimitlessOrderBuilder,
     LimitlessOrderIntent,
@@ -58,88 +57,13 @@ def test_hmac_headers_are_deterministic_for_fixed_timestamp() -> None:
     assert headers["lmts-signature"] == "5zSDAV/i4VSq3Ssr1iOelejFJZo8bIcDMvb/5tAB528="
 
 
-def test_pair_trade_runner_hedges_after_limitless_fill() -> None:
-    class FakeLimitless:
-        def submit(self, candidate):
-            return {"submitted": True, "matched": True, "filled_usdc": 20.0, "raw": {"ok": True}}
-
-    class FakeHedge:
-        def hedge(self, plan):
-            assert plan.symbol == "BTC"
-            assert plan.side == "SHORT"
-            return {"submitted": True, "raw": {"oid": 1}}
-
-    runner = PairTradeRunner(limitless=FakeLimitless(), hedger=FakeHedge())
-    state = runner.run(
-        {
-            "slug": "btc",
-            "symbol": "BTC",
-            "hyperliquid_hedge_side": "SHORT",
-            "hyperliquid_mid": 100.0,
-            "stake_usdc": 20.0,
-        }
-    )
-
-    assert state.state == TradeState.HEDGED
-    assert state.limitless_result["submitted"] is True
-    assert state.hedge_result["submitted"] is True
-
-
-def test_pair_trade_runner_uses_bounded_binary_delta_notional() -> None:
-    class FakeLimitless:
-        def submit(self, candidate):
-            return {"submitted": True, "matched": True, "filled_usdc": 20.0, "raw": {"ok": True}}
-
-    class FakeHedge:
-        def hedge(self, plan: HedgePlan):
-            assert plan.notional_usdc == 11.0
-            return {"submitted": True, "raw": {"oid": 1}}
-
-    state = PairTradeRunner(limitless=FakeLimitless(), hedger=FakeHedge()).run(
-        {
-            "slug": "btc",
-            "symbol": "BTC",
-            "side": "UP",
-            "hyperliquid_hedge_side": "SHORT",
-            "hyperliquid_mid": 100.0,
-            "threshold_price": 120.0,
-            "seconds_to_expiry": 300,
-            "stake_usdc": 20.0,
-            "limit_price": 0.9,
-            "fair_probability": 0.01,
-        }
-    )
-
-    assert state.state == TradeState.HEDGED
-
-
-def test_pair_trade_runner_does_not_hedge_unfilled_limitless_order() -> None:
-    class FakeLimitless:
-        def submit(self, candidate):
-            return {"submitted": True, "matched": False, "raw": {"ok": True}}
-
-    class FakeHedge:
-        def hedge(self, plan: HedgePlan):
-            raise AssertionError("hedge should not be called")
-
-    state = PairTradeRunner(limitless=FakeLimitless(), hedger=FakeHedge()).run(
-        {"slug": "btc", "symbol": "BTC", "hyperliquid_hedge_side": "SHORT", "hyperliquid_mid": 100.0, "stake_usdc": 20.0}
-    )
-
-    assert state.state == TradeState.LIMITLESS_UNFILLED
-
-
-def test_pair_trade_runner_can_record_unhedged_fill() -> None:
+def test_pair_trade_runner_records_limitless_fill_unhedged() -> None:
     class FakeLimitless:
         def submit(self, candidate):
             return {"submitted": True, "matched": True, "filled_usdc": 5.0, "raw": {"ok": True}}
 
-    class FakeHedge:
-        def hedge(self, plan: HedgePlan):
-            raise AssertionError("hedge should not be called")
-
-    state = PairTradeRunner(limitless=FakeLimitless(), hedger=FakeHedge(), require_hedge=False).run(
-        {"slug": "btc", "symbol": "BTC", "hyperliquid_hedge_side": "SHORT", "hyperliquid_mid": 100.0, "stake_usdc": 5.0}
+    state = PairTradeRunner(limitless=FakeLimitless()).run(
+        {"slug": "btc", "symbol": "BTC", "hyperliquid_mid": 100.0, "stake_usdc": 5.0}
     )
 
     assert state.state == TradeState.LIMITLESS_FILLED_UNHEDGED
@@ -147,22 +71,16 @@ def test_pair_trade_runner_can_record_unhedged_fill() -> None:
     assert state.hedge_result is None
 
 
-def test_pair_trade_runner_marks_blocked_hedge_as_failed() -> None:
+def test_pair_trade_runner_reports_unfilled_limitless_order() -> None:
     class FakeLimitless:
         def submit(self, candidate):
-            return {"submitted": True, "matched": True, "filled_usdc": 9.0, "raw": {"ok": True}}
+            return {"submitted": True, "matched": False, "raw": {"ok": True}}
 
-    class FakeHedge:
-        def hedge(self, plan: HedgePlan):
-            return {"submitted": False, "blocked": True, "reason": "below_min_notional"}
-
-    state = PairTradeRunner(limitless=FakeLimitless(), hedger=FakeHedge()).run(
-        {"slug": "btc", "symbol": "BTC", "hyperliquid_hedge_side": "SHORT", "hyperliquid_mid": 100.0, "stake_usdc": 9.0}
+    state = PairTradeRunner(limitless=FakeLimitless()).run(
+        {"slug": "btc", "symbol": "BTC", "hyperliquid_mid": 100.0, "stake_usdc": 20.0}
     )
 
-    assert state.state == TradeState.HEDGE_FAILED
-    assert state.hedge_result == {"submitted": False, "blocked": True, "reason": "below_min_notional"}
-    assert state.error == "hedge_not_submitted: below_min_notional"
+    assert state.state == TradeState.LIMITLESS_UNFILLED
 
 
 def test_candidate_to_limitless_intent_uses_up_down_token_and_venue() -> None:

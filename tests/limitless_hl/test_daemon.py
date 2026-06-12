@@ -98,9 +98,6 @@ def test_build_runner_returns_preview_legs_in_dry_run(tmp_path: Any) -> None:
 
     args = argparse.Namespace(
         live_armed=False,
-        hedge_live=False,
-        max_hedge_notional_usdc=5.0,
-        hyperliquid_env_file=".env.hyperliquid",
         client_order_prefix="test",
     )
     candidate = _fake_candidate()
@@ -114,13 +111,12 @@ def test_build_runner_returns_preview_legs_in_dry_run(tmp_path: Any) -> None:
     result = runner.run(candidate)
 
     # Dry-run: preview leg simulates a paper fill so the learner can resolve it later.
-    assert result.state.value == "hedged"
+    assert result.state.value == "limitless_filled_unhedged"
     assert result.limitless_result is not None
     assert result.limitless_result["matched"] is True
     assert result.limitless_result["filled_usdc"] == candidate["stake_usdc"]
     assert result.limitless_result["raw"]["mode"] == "preview"
-    assert result.hedge_result is not None
-    assert result.hedge_result["submitted"] is True
+    assert result.hedge_result is None
 
 
 def test_filter_candidates_limits_live_unhedged_to_vetted_slice() -> None:

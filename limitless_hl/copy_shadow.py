@@ -78,7 +78,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Required PM-fair minus our fee-adjusted ask to chase")
     p.add_argument("--smart-chase-max", type=float, default=0.15,
                    help="Never chase further than this beyond the shark price")
-    p.add_argument("--min-price", type=float, default=0.05)
+    p.add_argument("--min-price", type=float, default=0.52,
+                   help="Hard floor on the ask we pay. price<=0.50 copies were "
+                        "the entire 2026-06-13 bleed (-56 -> -1 with this floor); "
+                        "longshots carry the fee AND revert to ~25-30% base rate.")
+    p.add_argument("--probation-hours", type=float, default=24.0,
+                   help="A newly-seen wallet must have history older than this "
+                        "before we copy it (anti-churn).")
     p.add_argument("--max-price", type=float, default=0.92)
     p.add_argument("--stake-usdc", type=float, default=1.0)
     p.add_argument("--iterations", type=int, default=0)
@@ -111,6 +117,7 @@ def rank_wallets(
     fade_max_pnl: float = -50.0,
     fade_max_roi: float = -0.30,
     max_sharks: int = 12,
+    probation_hours: float = 24.0,
 ) -> tuple[set[str], set[str]]:
     """Returns (sharks, fish): wallets to copy and wallets to bet against."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
@@ -125,8 +132,9 @@ def rank_wallets(
         }
         pos: dict[tuple[str, str, str], list[float]] = defaultdict(lambda: [0.0, 0.0])
         px: dict[str, list[float]] = defaultdict(lambda: [0.0, 0])
+        first_seen: dict[str, int] = {}
         for t in con.execute(
-            "SELECT account, market_slug, side, outcome, price, shares, collateral "
+            "SELECT account, market_slug, side, outcome, price, shares, collateral, created_at_ms "
             "FROM trades WHERE outcome IN ('UP','DOWN') AND account != ''"
         ):
             if t["market_slug"] not in res:
@@ -137,6 +145,10 @@ def rank_wallets(
             pos[k][1] += sign * t["collateral"]
             px[t["account"]][0] += t["price"]
             px[t["account"]][1] += 1
+            a = t["account"]
+            cm = int(t["created_at_ms"] or 0)
+            if a not in first_seen or cm < first_seen[a]:
+                first_seen[a] = cm
     finally:
         con.close()
 
@@ -156,6 +168,13 @@ def rank_wallets(
         if len(mkts[acct]) < min_markets or st <= 0 or n_px <= 0:
             continue
         avg_px = px[acct][0] / n_px
+        # Probation: a newly-appeared wallet must have a track record older than
+        # probation_hours before we copy real size. 13 wallets that churned in
+        # within 48h drove 69% of the 2026-06-13 loss.
+        import time as _t
+        age_h = (_t.time() * 1000 - first_seen.get(acct, 0)) / 3_600_000
+        if age_h < probation_hours:
+            continue
         if p >= min_pnl and p / st >= min_roi and avg_px <= max_avg_price:
             shark_rank.append((p, acct))
         elif p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price:
@@ -609,6 +628,7 @@ def main() -> None:
                     fade_max_pnl=args.fade_max_pnl,
                     fade_max_roi=args.fade_max_roi,
                     max_sharks=args.max_sharks,
+                    probation_hours=args.probation_hours,
                 )
                 ranked_at = time.time()
                 _log(cs.out_path, {"event": "leaderboard", "sharks": len(cs.sharks),

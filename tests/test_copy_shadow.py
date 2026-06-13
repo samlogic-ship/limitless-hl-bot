@@ -55,21 +55,37 @@ def _make_flow_db(path: Path) -> None:
 def test_rank_selects_value_shark_and_fish(tmp_path):
     db = tmp_path / "flow.sqlite3"
     _make_flow_db(db)
+    # net-of-fee ranking: 0xshark wins every market at 0.35 -> big +net/trade;
+    # min_resolved lowered to fixture size (12 markets).
     sharks, fish = rank_wallets(
-        str(db), min_markets=10, min_roi=0.05, min_pnl=20.0, max_avg_price=0.85
+        str(db), min_markets=10, min_roi=0.05, min_pnl=20.0, max_avg_price=0.85,
+        min_net_per_trade=0.05, min_resolved=10, min_win_rate=0.50,
+        probation_hours=0.0,
     )
     assert sharks == {"0xshark"}
     assert fish == {"0xfish"}  # -$60 on $60 staked, ROI -100%
 
 
-def test_rank_sniper_included_when_price_cap_lifted(tmp_path):
+def test_rank_sniper_excluded_by_net_per_trade(tmp_path):
+    # 0xsniper wins every market but buys at 0.98 -> net/trade ~+0.02, BELOW the
+    # 0.05 net gate. The old gross logic would include it; net-of-fee ranking
+    # correctly rejects it (no copyable edge after fees).
     db = tmp_path / "flow.sqlite3"
     _make_flow_db(db)
     sharks, fish = rank_wallets(
-        str(db), min_markets=10, min_roi=0.001, min_pnl=1.0, max_avg_price=1.0
+        str(db), min_markets=10, min_roi=0.001, min_pnl=1.0, max_avg_price=1.0,
+        min_net_per_trade=0.05, min_resolved=10, min_win_rate=0.50,
+        probation_hours=0.0,
     )
-    assert "0xsniper" in sharks and "0xshark" in sharks
-    assert "0xsniper" not in fish
+    assert "0xshark" in sharks       # +net/trade survivor
+    assert "0xsniper" not in sharks  # +0.02 net < 0.05 gate
+    # with the gate dropped, the sniper qualifies again (sanity)
+    sharks2, _ = rank_wallets(
+        str(db), min_markets=10, min_roi=0.001, min_pnl=1.0, max_avg_price=1.0,
+        min_net_per_trade=0.0, min_resolved=10, min_win_rate=0.50,
+        probation_hours=0.0,
+    )
+    assert "0xsniper" in sharks2
 
 
 def test_copy_record_is_learner_compatible():

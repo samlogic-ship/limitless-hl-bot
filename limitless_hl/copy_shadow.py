@@ -52,6 +52,10 @@ BASE_URL = "https://api.limitless.exchange"
 FAST_INTERVALS = {"5m", "15m", "1h"}
 
 
+def _taker_fee(price: float) -> float:
+    return 0.03 if price <= 0.5 else max(0.0, 0.03 * (1 - (price - 0.5) / 0.5))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Shadow-copy profitable Limitless wallets")
     p.add_argument("--flow-db", default="tmp/limitless_hl/flow.sqlite3")
@@ -66,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fade-max-pnl", type=float, default=-50.0,
                    help="Wallets at or below this realized PnL are fade candidates")
     p.add_argument("--fade-max-roi", type=float, default=-0.30)
+    p.add_argument("--min-net-per-trade", type=float, default=0.05,
+                   help="Select wallets whose NET-OF-FEE per-trade PnL (as WE would "
+                        "earn copying them) exceeds this. Gross ranking let net-losers in.")
+    p.add_argument("--min-resolved", type=int, default=40,
+                   help="Minimum resolved trades for a wallet to qualify (real track record)")
+    p.add_argument("--min-win-rate", type=float, default=0.50,
+                   help="Exclude longshot-dependent wallets we cannot copy profitably")
     p.add_argument("--max-sharks", type=int, default=12,
                    help="Cap the copy leaderboard to the top N wallets by PnL; "
                         "the 2026-06-10 expansion to 38 sharks diluted edge")
@@ -118,6 +129,9 @@ def rank_wallets(
     fade_max_roi: float = -0.30,
     max_sharks: int = 12,
     probation_hours: float = 24.0,
+    min_net_per_trade: float = 0.05,
+    min_resolved: int = 40,
+    min_win_rate: float = 0.50,
 ) -> tuple[set[str], set[str]]:
     """Returns (sharks, fish): wallets to copy and wallets to bet against."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
@@ -149,16 +163,37 @@ def rank_wallets(
             cm = int(t["created_at_ms"] or 0)
             if a not in first_seen or cm < first_seen[a]:
                 first_seen[a] = cm
+        # per-trade net-of-fee copy outcomes: each taker BUY, did that side win?
+        con_trades_for_net = [
+            (r["account"], r["price"], 1 if res[r["market_slug"]] == r["outcome"] else 0)
+            for r in con.execute(
+                "SELECT account, market_slug, outcome, price FROM trades "
+                "WHERE side = 0 AND outcome IN ('UP','DOWN') AND account != ''"
+            )
+            if r["market_slug"] in res
+        ]
     finally:
         con.close()
 
     pnl: dict[str, float] = defaultdict(float)
     staked: dict[str, float] = defaultdict(float)
     mkts: dict[str, set[str]] = defaultdict(set)
+    # Net-of-fee copy metrics: per-trade PnL WE would realize copying this wallet
+    # at $1 flat (won -> 1/price*(1-fee)-1, lost -> -1), plus win count.
+    net_pnl: dict[str, float] = defaultdict(float)
+    net_n: dict[str, int] = defaultdict(int)
+    net_w: dict[str, int] = defaultdict(int)
     for (acct, slug, outcome), (sh, cost) in pos.items():
         pnl[acct] += (sh if res[slug] == outcome else 0.0) - cost
         staked[acct] += max(cost, 0.0)
         mkts[acct].add(slug)
+    for raw in con_trades_for_net:
+        acct, price, won = raw
+        if price <= 0 or price >= 1:
+            continue
+        net_n[acct] += 1
+        net_w[acct] += won
+        net_pnl[acct] += (1.0 / price * (1 - _taker_fee(price)) - 1.0) if won else -1.0
 
     shark_rank: list[tuple[float, str]] = []
     fish: set[str] = set()
@@ -168,15 +203,18 @@ def rank_wallets(
         if len(mkts[acct]) < min_markets or st <= 0 or n_px <= 0:
             continue
         avg_px = px[acct][0] / n_px
-        # Probation: a newly-appeared wallet must have a track record older than
-        # probation_hours before we copy real size. 13 wallets that churned in
-        # within 48h drove 69% of the 2026-06-13 loss.
         import time as _t
         age_h = (_t.time() * 1000 - first_seen.get(acct, 0)) / 3_600_000
         if age_h < probation_hours:
             continue
-        if p >= min_pnl and p / st >= min_roi and avg_px <= max_avg_price:
-            shark_rank.append((p, acct))
+        nn = net_n.get(acct, 0)
+        if nn >= min_resolved:
+            npt = net_pnl[acct] / nn
+            nwr = net_w[acct] / nn
+            # Rank/select by NET-OF-FEE per-trade PnL: this is literally what we
+            # would earn copying them. Require a winning hit rate too.
+            if npt >= min_net_per_trade and nwr >= min_win_rate and avg_px <= max_avg_price:
+                shark_rank.append((npt, acct))
         elif p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price:
             fish.add(acct)
     shark_rank.sort(reverse=True)
@@ -629,6 +667,9 @@ def main() -> None:
                     fade_max_roi=args.fade_max_roi,
                     max_sharks=args.max_sharks,
                     probation_hours=args.probation_hours,
+                    min_net_per_trade=args.min_net_per_trade,
+                    min_resolved=args.min_resolved,
+                    min_win_rate=args.min_win_rate,
                 )
                 ranked_at = time.time()
                 _log(cs.out_path, {"event": "leaderboard", "sharks": len(cs.sharks),

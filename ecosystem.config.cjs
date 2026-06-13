@@ -153,6 +153,20 @@ module.exports = {
       vizion: false,
     },
     {
+      name: "limitless-hl-perp",
+      cwd: ROOT,
+      script: "bash",
+      args: [
+        "--noprofile", "--norc", "-c",
+        `"${PYTHON}" -m limitless_hl.perp_momentum --loop-seconds 60 --horizon-seconds 900 --min-conf 0.34 --vol-max 12 --jsonl-out tmp/limitless_hl/perp_shadow.jsonl`,
+      ],
+      autorestart: true,
+      restart_delay: 10000,
+      max_restarts: 20,
+      time: true,
+      vizion: false,
+    },
+    {
       name: "limitless-hl-tg",
       cwd: ROOT,
       script: "bash",

@@ -649,7 +649,7 @@ def _source_name(path: Path) -> str:
         return "daemon"
     if name in {"funding_trades.jsonl", "funding_dry.jsonl"}:
         return "funding"
-    if name in {"daemon_shadow.jsonl", "copy_shadow.jsonl", "copy_live.jsonl"}:
+    if name in {"daemon_shadow.jsonl", "copy_shadow.jsonl", "copy_live.jsonl", "band_shadow.jsonl", "band_live.jsonl"}:
         return "daemon"
     return path.stem.replace("_trades", "")
 

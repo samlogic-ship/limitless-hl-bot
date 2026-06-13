@@ -208,14 +208,14 @@ def rank_wallets(
         if age_h < probation_hours:
             continue
         nn = net_n.get(acct, 0)
+        # SHARK: net-of-fee per-trade PnL is literally what we'd earn copying.
         if nn >= min_resolved:
             npt = net_pnl[acct] / nn
             nwr = net_w[acct] / nn
-            # Rank/select by NET-OF-FEE per-trade PnL: this is literally what we
-            # would earn copying them. Require a winning hit rate too.
             if npt >= min_net_per_trade and nwr >= min_win_rate and avg_px <= max_avg_price:
                 shark_rank.append((npt, acct))
-        elif p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price:
+        # FISH (independent of the shark net-gate): consistent gross losers.
+        if p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price:
             fish.add(acct)
     shark_rank.sort(reverse=True)
     sharks = {acct for _, acct in shark_rank[:max_sharks]}

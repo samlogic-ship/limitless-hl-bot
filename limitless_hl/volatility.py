@@ -18,6 +18,8 @@ import time
 
 import requests
 
+from .hl_info import post_info
+
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 BINANCE_BOOK_URL = "https://api.binance.com/api/v3/ticker/bookTicker"
 BINANCE_SYMBOL_OVERRIDES = {"HYPE": None}  # no Binance spot listing
@@ -251,20 +253,25 @@ class PricingProvider:
     # -- shared ------------------------------------------------------------------
 
     def _fetch_candles(self, symbol: str, interval: str, minutes: int) -> list[dict]:
+        # Bucket endTime to 15s so identical (symbol,interval,minutes) requests
+        # share one cached upstream call across processes (429 reduction).
         now_ms = int(time.time() * 1000)
-        resp = self.session.post(
-            HL_INFO_URL,
-            json={
-                "type": "candleSnapshot",
-                "req": {
-                    "coin": symbol,
-                    "interval": interval,
-                    "startTime": now_ms - minutes * 60_000,
-                    "endTime": now_ms,
-                },
+        end_ms = now_ms - (now_ms % 15_000)
+        data = post_info({
+            "type": "candleSnapshot",
+            "req": {
+                "coin": symbol,
+                "interval": interval,
+                "startTime": end_ms - minutes * 60_000,
+                "endTime": end_ms,
             },
-            timeout=self.timeout,
-        )
+        }, timeout=self.timeout)
+
+        class _R:
+            def __init__(self, d): self._d = d
+            def raise_for_status(self): pass
+            def json(self): return self._d
+        resp = _R(data)
         resp.raise_for_status()
         candles = resp.json()
         if not isinstance(candles, list) or not candles:

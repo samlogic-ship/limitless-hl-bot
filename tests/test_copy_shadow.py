@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import subprocess
 import sys
 from pathlib import Path
 
 from limitless_hl.copy_shadow import rank_wallets
+
+_NOW_MS = int(time.time() * 1000)
 
 
 def _make_flow_db(path: Path) -> None:
@@ -28,25 +31,25 @@ def _make_flow_db(path: Path) -> None:
         con.execute(
             "INSERT INTO markets (slug, symbol, interval, expiration_ms, resolved,"
             " winning_outcome) VALUES (?, 'BTC', '15m', ?, 1, 'UP')",
-            (slug, 1000 + i),
+            (slug, _NOW_MS - (12 - i) * 60_000),
         )
         # value shark: buys UP cheap, wins every market
         con.execute(
             "INSERT INTO trades (market_slug, account, side, outcome, price, shares,"
             " collateral, created_at_ms) VALUES (?, '0xshark', 0, 'UP', 0.35, 10, 3.5, ?)",
-            (slug, 100 + i),
+            (slug, _NOW_MS - (12 - i) * 60_000 - 5_000),
         )
         # sniper: buys UP at 0.98 (excluded by max_avg_price)
         con.execute(
             "INSERT INTO trades (market_slug, account, side, outcome, price, shares,"
             " collateral, created_at_ms) VALUES (?, '0xsniper', 0, 'UP', 0.98, 10, 9.8, ?)",
-            (slug, 100 + i),
+            (slug, _NOW_MS - (12 - i) * 60_000 - 5_000),
         )
         # fish: buys DOWN, loses every market
         con.execute(
             "INSERT INTO trades (market_slug, account, side, outcome, price, shares,"
             " collateral, created_at_ms) VALUES (?, '0xfish', 0, 'DOWN', 0.5, 10, 5.0, ?)",
-            (slug, 100 + i),
+            (slug, _NOW_MS - (12 - i) * 60_000 - 5_000),
         )
     con.commit()
     con.close()
@@ -60,7 +63,7 @@ def test_rank_selects_value_shark_and_fish(tmp_path):
     sharks, fish = rank_wallets(
         str(db), min_markets=10, min_roi=0.05, min_pnl=20.0, max_avg_price=0.85,
         min_net_per_trade=0.05, min_resolved=10, min_win_rate=0.50,
-        probation_hours=0.0,
+        probation_hours=0.0, min_eff_n=5.0, activity_hours=9999.0, now_ms=_NOW_MS,
     )
     assert sharks == {"0xshark"}
     assert fish == {"0xfish"}  # -$60 on $60 staked, ROI -100%
@@ -75,7 +78,7 @@ def test_rank_sniper_excluded_by_net_per_trade(tmp_path):
     sharks, fish = rank_wallets(
         str(db), min_markets=10, min_roi=0.001, min_pnl=1.0, max_avg_price=1.0,
         min_net_per_trade=0.05, min_resolved=10, min_win_rate=0.50,
-        probation_hours=0.0,
+        probation_hours=0.0, min_eff_n=5.0, activity_hours=9999.0, now_ms=_NOW_MS,
     )
     assert "0xshark" in sharks       # +net/trade survivor
     assert "0xsniper" not in sharks  # +0.02 net < 0.05 gate
@@ -83,7 +86,7 @@ def test_rank_sniper_excluded_by_net_per_trade(tmp_path):
     sharks2, _ = rank_wallets(
         str(db), min_markets=10, min_roi=0.001, min_pnl=1.0, max_avg_price=1.0,
         min_net_per_trade=0.0, min_resolved=10, min_win_rate=0.50,
-        probation_hours=0.0,
+        probation_hours=0.0, min_eff_n=5.0, activity_hours=9999.0, min_net_lb=-1.0, now_ms=_NOW_MS,
     )
     assert "0xsniper" in sharks2
 

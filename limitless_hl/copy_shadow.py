@@ -73,8 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-net-per-trade", type=float, default=0.05,
                    help="Select wallets whose NET-OF-FEE per-trade PnL (as WE would "
                         "earn copying them) exceeds this. Gross ranking let net-losers in.")
-    p.add_argument("--min-resolved", type=int, default=40,
-                   help="Minimum resolved trades for a wallet to qualify (real track record)")
     p.add_argument("--min-win-rate", type=float, default=0.50,
                    help="Exclude longshot-dependent wallets we cannot copy profitably")
     p.add_argument("--max-sharks", type=int, default=12,
@@ -94,8 +92,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "the entire 2026-06-13 bleed (-56 -> -1 with this floor); "
                         "longshots carry the fee AND revert to ~25-30% base rate.")
     p.add_argument("--probation-hours", type=float, default=24.0,
-                   help="A newly-seen wallet must have history older than this "
-                        "before we copy it (anti-churn).")
+                   help="(legacy) retained for back-compat; superseded by recency weighting")
+    p.add_argument("--halflife-hours", type=float, default=24.0,
+                   help="Recency half-life: a winner who goes cold/rotates away decays out in ~1 day")
+    p.add_argument("--min-eff-n", type=float, default=12.0,
+                   help="Min recency-weighted effective sample before a wallet can qualify")
+    p.add_argument("--activity-hours", type=float, default=12.0,
+                   help="Drop wallets with no trade in this window (dormant/rotated-away)")
+    p.add_argument("--min-net-lb", type=float, default=0.05,
+                   help="Admit only when 2-sigma lower bound of net/trade exceeds this (significance)")
+    p.add_argument("--min-resolved", type=int, default=10,
+                   help="Hard floor on raw resolved trades regardless of significance")
     p.add_argument("--max-price", type=float, default=0.92)
     p.add_argument("--stake-usdc", type=float, default=1.0)
     p.add_argument("--iterations", type=int, default=0)
@@ -132,6 +139,11 @@ def rank_wallets(
     min_net_per_trade: float = 0.05,
     min_resolved: int = 40,
     min_win_rate: float = 0.50,
+    halflife_hours: float = 24.0,
+    min_eff_n: float = 12.0,
+    activity_hours: float = 12.0,
+    min_net_lb: float = 0.05,
+    now_ms: int | None = None,
 ) -> tuple[set[str], set[str]]:
     """Returns (sharks, fish): wallets to copy and wallets to bet against."""
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
@@ -165,9 +177,11 @@ def rank_wallets(
                 first_seen[a] = cm
         # per-trade net-of-fee copy outcomes: each taker BUY, did that side win?
         con_trades_for_net = [
-            (r["account"], r["price"], 1 if res[r["market_slug"]] == r["outcome"] else 0)
+            (r["account"], r["price"],
+             1 if res[r["market_slug"]] == r["outcome"] else 0,
+             int(r["created_at_ms"] or 0))
             for r in con.execute(
-                "SELECT account, market_slug, outcome, price FROM trades "
+                "SELECT account, market_slug, outcome, price, created_at_ms FROM trades "
                 "WHERE side = 0 AND outcome IN ('UP','DOWN') AND account != ''"
             )
             if r["market_slug"] in res
@@ -180,20 +194,34 @@ def rank_wallets(
     mkts: dict[str, set[str]] = defaultdict(set)
     # Net-of-fee copy metrics: per-trade PnL WE would realize copying this wallet
     # at $1 flat (won -> 1/price*(1-fee)-1, lost -> -1), plus win count.
-    net_pnl: dict[str, float] = defaultdict(float)
-    net_n: dict[str, int] = defaultdict(int)
-    net_w: dict[str, int] = defaultdict(int)
+    import time as _t
+    _now = now_ms if now_ms is not None else int(_t.time() * 1000)
+    _hl_ms = max(halflife_hours, 0.1) * 3_600_000
+    # recency-weighted, per-wallet: sum of weights (eff_n), weighted pnl, weighted
+    # pnl^2 (for variance), weighted wins, raw count, last activity.
+    w_sum: dict[str, float] = defaultdict(float)
+    w_pnl: dict[str, float] = defaultdict(float)
+    w_pnl2: dict[str, float] = defaultdict(float)
+    w_win: dict[str, float] = defaultdict(float)
+    raw_n: dict[str, int] = defaultdict(int)
+    last_ms: dict[str, int] = defaultdict(int)
     for (acct, slug, outcome), (sh, cost) in pos.items():
         pnl[acct] += (sh if res[slug] == outcome else 0.0) - cost
         staked[acct] += max(cost, 0.0)
         mkts[acct].add(slug)
-    for raw in con_trades_for_net:
-        acct, price, won = raw
+    for acct, price, won, cm in con_trades_for_net:
         if price <= 0 or price >= 1:
             continue
-        net_n[acct] += 1
-        net_w[acct] += won
-        net_pnl[acct] += (1.0 / price * (1 - _taker_fee(price)) - 1.0) if won else -1.0
+        age_ms = max(0, _now - cm)
+        wt = 0.5 ** (age_ms / _hl_ms)  # 24h half-life
+        per = (1.0 / price * (1 - _taker_fee(price)) - 1.0) if won else -1.0
+        w_sum[acct] += wt
+        w_pnl[acct] += wt * per
+        w_pnl2[acct] += wt * per * per
+        w_win[acct] += wt * won
+        raw_n[acct] += 1
+        if cm > last_ms[acct]:
+            last_ms[acct] = cm
 
     shark_rank: list[tuple[float, str]] = []
     fish: set[str] = set()
@@ -203,19 +231,20 @@ def rank_wallets(
         if len(mkts[acct]) < min_markets or st <= 0 or n_px <= 0:
             continue
         avg_px = px[acct][0] / n_px
-        import time as _t
-        age_h = (_t.time() * 1000 - first_seen.get(acct, 0)) / 3_600_000
-        if age_h < probation_hours:
-            continue
-        nn = net_n.get(acct, 0)
-        # SHARK: net-of-fee per-trade PnL is literally what we'd earn copying.
-        if nn >= min_resolved:
-            npt = net_pnl[acct] / nn
-            nwr = net_w[acct] / nn
-            if npt >= min_net_per_trade and nwr >= min_win_rate and avg_px <= max_avg_price:
-                shark_rank.append((npt, acct))
-        # FISH (independent of the shark net-gate): consistent gross losers.
-        if p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price:
+        eff_n = w_sum.get(acct, 0.0)
+        recent_h = (_now - last_ms.get(acct, 0)) / 3_600_000
+        # SHARK: recency-weighted net-of-fee per-trade, admit on significance.
+        if eff_n >= min_eff_n and raw_n.get(acct, 0) >= min_resolved and recent_h <= activity_hours:
+            mean = w_pnl[acct] / eff_n
+            var = max(0.0, w_pnl2[acct] / eff_n - mean * mean)
+            se = (var ** 0.5) / (eff_n ** 0.5)
+            lb = mean - 2.0 * se               # 2-sigma lower bound
+            wr = w_win[acct] / eff_n
+            if lb > min_net_lb and wr >= min_win_rate and avg_px <= max_avg_price:
+                shark_rank.append((lb, acct))   # rank by conservative lower bound
+        # FISH (independent): consistent gross losers, still recently active.
+        if (p <= fade_max_pnl and p / st <= fade_max_roi and avg_px <= max_avg_price
+                and recent_h <= activity_hours):
             fish.add(acct)
     shark_rank.sort(reverse=True)
     sharks = {acct for _, acct in shark_rank[:max_sharks]}
@@ -670,6 +699,10 @@ def main() -> None:
                     min_net_per_trade=args.min_net_per_trade,
                     min_resolved=args.min_resolved,
                     min_win_rate=args.min_win_rate,
+                    halflife_hours=args.halflife_hours,
+                    min_eff_n=args.min_eff_n,
+                    activity_hours=args.activity_hours,
+                    min_net_lb=args.min_net_lb,
                 )
                 ranked_at = time.time()
                 _log(cs.out_path, {"event": "leaderboard", "sharks": len(cs.sharks),

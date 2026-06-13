@@ -5,6 +5,8 @@ from typing import Any
 
 import requests
 
+from .hl_info import post_info
+
 from .model import LimitlessMarket, OrderBook
 from .attribution import ResolvedMarket
 from .http_cache import cached_get_json
@@ -128,13 +130,9 @@ class HyperliquidClient:
         self.session.headers.update({"Accept": "application/json", "User-Agent": "limitless-hl/0.1"})
 
     def all_mids(self) -> dict[str, float]:
-        response = self.session.post(
-            f"{self.base_url}/info",
-            json={"type": "allMids"},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        return self.parse_all_mids(response.json())
+        # Shared cross-process cache (3s TTL); the scanner calls this every loop
+        # in several processes and was the main api.hyperliquid.xyz/info 429 source.
+        return self.parse_all_mids(post_info({"type": "allMids"}, timeout=self.timeout))
 
     @staticmethod
     def parse_all_mids(payload: dict[str, Any]) -> dict[str, float]:

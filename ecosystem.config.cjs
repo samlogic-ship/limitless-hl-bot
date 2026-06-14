@@ -167,6 +167,16 @@ module.exports = {
       vizion: false,
     },
     {
+      name: "limitless-hl-funding-monitor",
+      cwd: ROOT,
+      script: "bash",
+      args: [
+        "--noprofile", "--norc", "-c",
+        `${LOAD_ENV}; "${PYTHON}" -m limitless_hl.funding_monitor --loop-seconds 1800 --alert-annual-pct 40 --sustain 4`,
+      ],
+      autorestart: true, restart_delay: 30000, max_restarts: 20, time: true, vizion: false,
+    },
+    {
       name: "limitless-hl-tg",
       cwd: ROOT,
       script: "bash",

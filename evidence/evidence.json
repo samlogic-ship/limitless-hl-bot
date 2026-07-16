@@ -1,7 +1,7 @@
 {
   "schema": "frantic.sourcey_docs_evidence.v1",
   "summary": "Sourcey-built maintainer reference for the MIT-licensed samlogic-ship/limitless-hl-bot repository, pinned to commit d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db.",
-  "public_url": "https://alpha.samlogic.org/",
+  "public_url": "https://docs.samlogic.org/",
   "target": {
     "repo_url": "https://github.com/samlogic-ship/limitless-hl-bot",
     "commit": "d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db",
@@ -9,7 +9,7 @@
     "package": "limitless-hl-bot",
     "runtime": "Python 3.12",
     "maintainer_home": "https://samlogic.org",
-    "docs_home": "https://alpha.samlogic.org/",
+    "docs_home": "https://docs.samlogic.org/",
     "recent_activity": "2026-06-14T12:12:09Z feat(funding_monitor): dormant funding-spike watcher + stand down active edge-hunt"
   },
   "sourcey": {
@@ -55,7 +55,7 @@
     "target commit d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db is pinned in the generated site and includes the MIT license",
     "target contains more than 30 Python implementation modules plus a dedicated test suite",
     "Sourcey markdown adapter built six navigable pages and 56 pinned source links",
-    "the docs are published at alpha.samlogic.org, a dedicated Samlogic maintainer documentation domain, and the repository README links back to that exact docs home",
+    "the docs are published at docs.samlogic.org, a dedicated Samlogic maintainer documentation domain with an isolated machine-readable tunnel, and the repository README links back to that exact docs home",
     "the site covers discovery, scoring, execution, risk, exits, operations, and learning rather than only a landing page",
     "runx validation sealed with valid=true, zero missing pages, and 56 source links"
   ]

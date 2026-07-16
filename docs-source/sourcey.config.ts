@@ -1,6 +1,6 @@
 import { defineConfig, markdown } from "sourcey";
 
-const commit = "5c569c592082a823f22850722ec3f88d0fb2dc3a";
+const commit = "d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db";
 
 export default defineConfig({
   name: "Limitless HL Bot Maintainer Reference",

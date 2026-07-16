@@ -1,0 +1,62 @@
+{
+  "schema": "frantic.sourcey_docs_evidence.v1",
+  "summary": "Sourcey-built maintainer reference for the MIT-licensed samlogic-ship/limitless-hl-bot repository, pinned to commit d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db.",
+  "public_url": "https://alpha.samlogic.org/",
+  "target": {
+    "repo_url": "https://github.com/samlogic-ship/limitless-hl-bot",
+    "commit": "d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db",
+    "license": "MIT",
+    "package": "limitless-hl-bot",
+    "runtime": "Python 3.12",
+    "maintainer_home": "https://samlogic.org",
+    "docs_home": "https://alpha.samlogic.org/",
+    "recent_activity": "2026-06-14T12:12:09Z feat(funding_monitor): dormant funding-spike watcher + stand down active edge-hunt"
+  },
+  "sourcey": {
+    "version": "sourcey v3.6.4",
+    "adapter": "markdown",
+    "command": "sourcey build --config docs-source/sourcey.config.ts -o public-docs",
+    "config": "docs-source/sourcey.config.ts",
+    "output_dir": "public-docs",
+    "page_list": [
+      "overview",
+      "market-discovery",
+      "scoring-and-signals",
+      "execution-and-orders",
+      "risk-and-exits",
+      "operations-and-learning"
+    ]
+  },
+  "runx": {
+    "version": "runx-cli 0.7.1",
+    "receipt_ref": "runx:receipt:sha256:212ef3157eefb551c4b211fd492543eb99ea5164ddf1107a7c22b8e8f9ea5886",
+    "receipt_file": "evidence/receipt.json",
+    "receipt_verification": "runx verify --receipt evidence/receipt.json --allow-local-development-signatures --json",
+    "validation_command": "runx skill ./validation -i site_dir=public-docs -i target_commit=d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db --json"
+  },
+  "coverage": {
+    "documented_count_minimum": 20,
+    "source_link_count": 56,
+    "documented_groups": [
+      "venue clients and market discovery",
+      "cross-venue feeds and flow recording",
+      "feature scoring and signal calibration",
+      "order intent construction and submission",
+      "maker quotes and collateral accounting",
+      "risk gates and exit policy",
+      "event ingestion and market resolution",
+      "performance reporting and process operations"
+    ]
+  },
+  "observations": [
+    "runx --version output: runx-cli 0.7.1",
+    "sourcey --help output identifies sourcey v3.6.4",
+    "target repository is public and owned by the maintainer publishing at samlogic.org",
+    "target commit d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db is pinned in the generated site and includes the MIT license",
+    "target contains more than 30 Python implementation modules plus a dedicated test suite",
+    "Sourcey markdown adapter built six navigable pages and 56 pinned source links",
+    "the docs are published at alpha.samlogic.org, a dedicated Samlogic maintainer documentation domain, and the repository README links back to that exact docs home",
+    "the site covers discovery, scoring, execution, risk, exits, operations, and learning rather than only a landing page",
+    "runx validation sealed with valid=true, zero missing pages, and 56 source links"
+  ]
+}

@@ -5,7 +5,7 @@ A small-account Limitless directional trading system with Hyperliquid-derived sc
 ## Documentation
 
 The source-linked maintainer reference is published at
-[docs.samlogic.org](https://docs.samlogic.org/).
+[samlogic-ship.github.io/limitless-hl-bot](https://samlogic-ship.github.io/limitless-hl-bot/).
 It is generated with Sourcey from this repository at a pinned commit.
 
 ## Current Production Posture

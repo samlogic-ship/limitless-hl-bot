@@ -5,7 +5,7 @@ A small-account Limitless directional trading system with Hyperliquid-derived sc
 ## Documentation
 
 The source-linked maintainer reference is published at
-[alpha.samlogic.org](https://alpha.samlogic.org/).
+[docs.samlogic.org](https://docs.samlogic.org/).
 It is generated with Sourcey from this repository at a pinned commit.
 
 ## Current Production Posture

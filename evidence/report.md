@@ -4,8 +4,8 @@
 - Target: `samlogic-ship/limitless-hl-bot`, pinned at commit `d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db`.
 - License: MIT, added at the pinned commit.
 - Activity: the target's preceding production commit is dated 2026-06-14 and the repository contains more than 30 Python implementation modules plus tests.
-- Public docs URL: `https://alpha.samlogic.org/`.
-- Maintainer domain: `samlogic.org`; `alpha.samlogic.org` is a dedicated maintainer-controlled documentation surface, and the target repository README links to that exact docs home.
+- Public docs URL: `https://docs.samlogic.org/`.
+- Maintainer domain: `samlogic.org`; `docs.samlogic.org` is a dedicated maintainer-controlled documentation surface with an isolated machine-readable tunnel, and the target repository README links to that exact docs home.
 - Sourcey command: `sourcey build --config docs-source/sourcey.config.ts -o public-docs`.
 - Sourcey adapter: Markdown.
 - Generated pages: overview, market discovery, scoring/signals, execution/orders, risk/exits, and operations/learning.

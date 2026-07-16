@@ -1,0 +1,16 @@
+skill: limitless-sourcey-site-validator
+version: "0.1.0"
+runners:
+  validate:
+    default: true
+    type: cli-tool
+    command: node
+    args: [run.mjs]
+    outputs:
+      validation_report: object
+    artifacts:
+      wrap_as: sourcey_limitless_site_validation
+      packet: sourcey.limitless_site_validation.v1
+    inputs:
+      site_dir: { type: string, required: true }
+      target_commit: { type: string, required: true }

@@ -1,0 +1,53 @@
+# Limitless HL Bot Maintainer Reference
+
+This reference maps the trading system back to commit `d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db`. It is for maintainers auditing how markets are discovered, scored, executed, exited, and learned from.
+
+## Limitless HL Bot
+
+### Limitless HL Bot Maintainer Reference
+
+Path: `/limitless-hl-bot/overview.html`
+
+This reference maps the trading system back to commit `d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db`. It is for maintainers auditing how markets are discovered, scored, executed, exited, and learned from.
+
+This reference maps the trading system back to commit d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db . It is for maintainers auditing how markets are discovered, scored, executed, exited, and learned from. Target Repository: samlogic-ship/limitless-hl-bot License: MIT Runtime: Python 3.12 Package: limitless_hl Architecture The system separates venue clients, market scanning, feature scoring, live execution, exit policy, operations, and post-trade learning. The primary maintainer entry points are: LimitlessClient LimitlessHyperliquidScanner score_candidate PairTradeRunner ExitEngine run_once The repository contains more than 30 implementation modules and a dedicated test suite. The following pages cover more than 20 source-backed APIs and operational concepts.
+
+### Market Discovery and Venue Clients
+
+Path: `/limitless-hl-bot/market-discovery.html`
+
+Discovery is read-only. It produces candidates and observations; order signing is delegated to the execution layer. Cached HTTP reads live in `cached_get_json`, which keeps network failures from silently becoming trading approval.
+
+Public surfaces API Source Role LimitlessClient.active_markets clients.py Fetch and normalize active Limitless markets. LimitlessClient.orderbook clients.py Read venue liquidity for a market. HyperliquidClient.mid_prices clients.py Read reference mids from Hyperliquid. LimitlessHyperliquidScanner.scan scanner.py Join venue markets with reference prices. pm_slug polymarket_feed.py Construct compatible Polymarket slugs. PolymarketFeed polymarket_feed.py Supply cross-venue comparison data. FlowRecorder flow_recorder.py Persist market and wallet flow observations. Data boundary Discovery is read-only. It produces candidates and observations; order signing is delegated to the execution layer. Cached HTTP reads live in cached_get_json , which keeps network failures from silently becoming trading approval.
+
+### Scoring and Signals
+
+Path: `/limitless-hl-bot/scoring-and-signals.html`
+
+Scores are evidence, not execution authority. The daemon applies strategy, price-band, cooldown, and learner gates before any candidate reaches an order builder.
+
+Feature model API Source Role MarketFeatures scorer.py Normalized market feature packet. ScoringConfig scorer.py Threshold and stake configuration. ScoreResult scorer.py Auditable score, reason, and stake output. LiveFeatureProvider scorer.py Fetch live mids, funding, momentum, and flow. score_candidate scorer.py Convert features into an explainable trade score. load_hl_bot_context scorer.py Load bounded, freshness-checked bot context. fit_symbol calibrator.py Fit symbol calibration from historical candles. signal_key funding_daemon.py Produce deterministic funding-signal identity. first_spike_decision funding_daemon.py Gate first-spike funding decisions. kelly_stake funding_daemon.py Bound stake from estimated edge and bankroll. Scores are evidence, not execution authority. The daemon applies strategy, price-band, cooldown, and learner gates before any candidate reaches an order builder.
+
+### Execution and Orders
+
+Path: `/limitless-hl-bot/execution-and-orders.html`
+
+The order layer keeps construction separate from submission so tests can prove payload shape without broadcasting. Live routing raises `LiveTradingBlocked` when the configured boundary does not authorize a live path.
+
+Intent construction API Source Role LimitlessCredentials live_trade.py Typed credential container. LimitlessOrderIntent live_trade.py Explicit outcome, side, price, and size intent. LimitlessOrderBuilder live_trade.py Build venue order payloads. LimitlessSubmitter live_trade.py Submit signed intents to Limitless. PairTradeRunner live_trade.py Coordinate the Limitless leg and optional hedge. candidate_to_limitless_intent live_trade.py Translate a scored candidate into a typed intent. sign_hmac_headers live_trade.py Create request authentication headers. ExecutionRouter execution.py Enforce paper/live routing policy. The order layer keeps construction separate from submission so tests can prove payload shape without broadcasting. Live routing raises LiveTradingBlocked when the configured boundary does not authorize a live path.
+
+### Risk, Quotes, and Exits
+
+Path: `/limitless-hl-bot/risk-and-exits.html`
+
+Risk is layered: quote sizing, collateral accounting, live-performance gates, loss cooldowns, and an exit engine each have independent evidence and tests.
+
+API Source Role MakerConfig maker.py Maker policy and quote bounds. compute_quotes maker.py Calculate bounded bid/ask plans. diff_orders maker.py Compare desired and existing orders. locked_usdc maker.py Account for collateral locked in open quotes. ExitConfig exiter.py Profit, loss, and timing exit limits. decide_exit exiter.py Return an explicit hold/exit decision. ExitEngine exiter.py Inspect positions and execute approved exits. evaluate_gates gatekeeper.py Evaluate learner and live-PnL gates. Risk is layered: quote sizing, collateral accounting, live-performance gates, loss cooldowns, and an exit engine each have independent evidence and tests.
+
+### Operations and Learning
+
+Path: `/limitless-hl-bot/operations-and-learning.html`
+
+PM2 process declarations live in `ecosystem.config.cjs`. The default posture keeps the funding-live process disabled until the learner has positive live evidence.
+
+API Source Role ingest_jsonl learner.py Ingest append-only trade events. resolve_pending learner.py Resolve trades against final market outcomes. build_report learner.py Build the performance report consumed by gates. slice_summary learner.py Summarize strategy/interval/symbol slices. write_report_atomic learner.py Publish reports without partial files. run_once learner.py Execute one ingest/resolve/report cycle. summarize_jsonl report.py Produce a compact operational summary. get_secret secrets.py Resolve secrets without committing them. PM2 process declarations live in ecosystem.config.cjs . The default posture keeps the funding-live process disabled until the learner has positive live evidence.

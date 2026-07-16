@@ -2,6 +2,12 @@
 
 A small-account Limitless directional trading system with Hyperliquid-derived scoring, PM2 process management, auto-claiming, and a learner loop that resolves fills into a SQLite ledger.
 
+## Documentation
+
+The source-linked maintainer reference is published at
+[alpha.samlogic.org](https://alpha.samlogic.org/).
+It is generated with Sourcey from this repository at a pinned commit.
+
 ## Current Production Posture
 
 - `limitless-hl-live`: live scored Limitless-only daemon.

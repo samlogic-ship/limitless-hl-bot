@@ -1,0 +1,13 @@
+{
+  "name": "limitless-hl-bot-sourcey-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "docs:build": "sourcey build --config docs-source/sourcey.config.ts -o public-docs"
+  },
+  "dependencies": {
+    "consola": "^3.4.2",
+    "sourcey": "3.6.4"
+  }
+}

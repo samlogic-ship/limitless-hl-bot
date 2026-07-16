@@ -4,6 +4,8 @@ const commit = "d5e965d3d5ff5f929d5bbe6cc34839d5fa8123db";
 
 export default defineConfig({
   name: "Limitless HL Bot Maintainer Reference",
+  siteUrl: "https://samlogic-ship.github.io",
+  baseUrl: "/limitless-hl-bot",
   repo: `https://github.com/samlogic-ship/limitless-hl-bot/tree/${commit}`,
   navigation: {
     tabs: [
